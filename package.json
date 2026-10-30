@@ -1,0 +1,14 @@
+{
+  "name": "sessions2dsh",
+  "version": "0.3.0",
+  "private": true,
+  "description": "Import other agents' session history into DeepSeek Harness.",
+  "type": "module",
+  "engines": { "node": ">=24" },
+  "bin": { "sessions2dsh": "bin/sessions2dsh.mjs" },
+  "scripts": {
+    "start": "node bin/sessions2dsh.mjs",
+    "test": "node --test --test-concurrency=1 test/*.test.mjs",
+    "doctor": "node bin/sessions2dsh.mjs doctor"
+  }
+}
