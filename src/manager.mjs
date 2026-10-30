@@ -1,8 +1,10 @@
 import { readFile, mkdir, open, unlink, rename } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { homedir } from 'node:os';
+import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import { sha256 } from './claude.mjs';
+import { targetSessionId } from './convert.mjs';
 import { loadRuntime, findRuntime, withStore, exists } from './runtime.mjs';
 import { check, ToolError, errorInfo } from './errors.mjs';
 import { connectApp, inspectApp, appIsRunning } from './app.mjs';
@@ -10,7 +12,7 @@ import { prepareAttachments, publishAttachments, verifyAttachments } from './att
 import { recoverLegacy } from './legacy.mjs';
 import { sourceAdapter } from './sources.mjs';
 import { snapshotDigest, checkSnapshot, backupFilePath, verifyFileBackups, sourceFilesState } from './snapshot.mjs';
-import { resolveWorkspaceCwd, syncWorkspace, workspaceOptions } from './workspace.mjs';
+import { resolveWorkspaceCwd, syncWorkspace, workspaceOptions, pinImportedSession } from './workspace.mjs';
 
 export const APP_RESTART_HINT = '请重启 DeepSeek Harness 应用';
 
@@ -24,7 +26,7 @@ export function defaults(options = {}) {
     attachmentHome: resolve(options.attachmentHome || (options.targetRoot ? join(resolve(options.targetRoot), '..', 'attachment-home') : dshHome)),
     workspaceStorageRoot: resolve(options.workspaceStorageRoot || join(dshHome, 'storages')),
     workspaceSync: options.workspaceSync ?? !options.targetRoot,
-    dataDir: resolve(options.dataDir || new URL('../data', import.meta.url).pathname),
+    dataDir: resolve(options.dataDir || fileURLToPath(new URL('../data', import.meta.url))),
     appLog: resolve(options.appLog || join(dshHome, 'web-launcher.log')),
   };
 }
@@ -80,12 +82,20 @@ export async function planImport(path, supplied = {}) {
   if (options.expectSha) check(input.sourceSha256 === options.expectSha, 'SOURCE_CHANGED', '源文件已变化，与 --expect-sha 不匹配。');
   const runtime = await loadRuntime(options.runtime);
   const attachments = await prepareAttachments(input, runtime);
+  const managedManifestPath = join(recordPath(options, targetSessionId(input)), 'manifest.json');
+  const managed = await exists(managedManifestPath) ? JSON.parse(await readFile(managedManifestPath, 'utf8')) : null;
+  if (managed) {
+    check(managed.id === targetSessionId(input) && managed.targetRoot === options.targetRoot && managed.header?.id === managed.id,
+      'MANIFEST', '已有导入记录的 ID 或目标路径不匹配。');
+    check(!options.cwd || options.cwd === managed.header.cwd || options.cwd === managed.workspace?.sourceCwd,
+      'TARGET_CONFLICT', '已有导入记录使用不同的 cwd；不会修改已发布会话或忽略显式覆盖。');
+  }
   const sourceCwd = options.cwd || input.rows?.find(row => row.cwd)?.cwd || input.records?.find(row => row.cwd)?.cwd;
-  const workspacePlan = await resolveWorkspaceCwd(sourceCwd, workspaceOptions(options));
+  // Existing imports keep their recorded cwd even if today's default directory
+  // has disappeared. Only new imports use the current fallback policy.
+  const workspacePlan = managed ? { cwd: managed.header.cwd } : await resolveWorkspaceCwd(sourceCwd, workspaceOptions(options));
   const plan = await adapter.convert(input, runtime, { ...options, ...(workspacePlan.cwd ? { cwd: workspacePlan.cwd } : {}), attachments });
-  const managedManifestPath = join(recordPath(options, plan.header.id), 'manifest.json');
-  if (await exists(managedManifestPath)) {
-    const managed = JSON.parse(await readFile(managedManifestPath, 'utf8'));
+  if (managed) {
     plan.header = managed.header;
     if (managed.workspace) plan.workspace = managed.workspace;
   } else if (workspacePlan.workspace) {
@@ -211,14 +221,18 @@ export async function importSession(path, supplied = {}) {
         workspaceResult = await syncWorkspace(plan.workspace ? plan : { ...plan, workspace: manifest.workspace }, options, runtime);
         if (workspaceResult) manifest.workspace = { ...workspaceResult, status: 'attached' };
       } catch (error) {
-        manifest.workspace = { ...manifest.workspace, status: 'failed', error: error.message };
+        manifest.workspace = { ...manifest.workspace, status: 'failed', error: error.message, code: errorInfo(error).code };
         workspaceResult = { ...manifest.workspace, ok: false };
       }
     }
     await writeAtomic(manifestPath, manifest);
     const result = { status: alreadyPresent ? 'already-imported' : 'imported', ...summary, duplicate: alreadyPresent, backup: directory };
     if (workspaceResult) result.workspace = workspaceResult;
-    if (workspaceResult?.ok !== false && !options._suppressAppRestartHint &&
+    if (options.pin) {
+      try { result.pin = await pinImportedSession(plan.header.id, options, runtime); }
+      catch (error) { result.pin = { ok: false, ...errorInfo(error) }; }
+    }
+    if ((workspaceResult?.ok === true || result.pin?.changed) && !options._suppressAppRestartHint &&
       (options._appRunning === undefined ? await appIsRunning(options.appLog) : options._appRunning)) {
       result.warnings = [...(result.warnings || []), APP_RESTART_HINT];
     }
@@ -226,9 +240,9 @@ export async function importSession(path, supplied = {}) {
       try {
         const rpc = options._rpc || await connectApp(options.appLog);
         result.application = await inspectApp(rpc, plan.header.id, plan.events);
-        if (options.pin) { await rpc('workspace/pinSession', { request: { sessionId: plan.header.id } }); result.application.pinned = true; }
       } catch (error) { result.application = { ok: false, ...errorInfo(error), hint: '原生会话已导入；应用验证失败不回滚历史。' }; }
     }
+    result.ok = result.workspace?.ok !== false && result.pin?.ok !== false && result.application?.ok !== false;
     return result;
   } finally { await lock.close(); await unlink(lockPath); }
 }

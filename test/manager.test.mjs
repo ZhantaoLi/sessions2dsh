@@ -1,13 +1,14 @@
 import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, writeFile, readFile, rm, stat } from 'node:fs/promises';
+import { mkdir, mkdtemp, writeFile, readFile, rm, stat, chmod, cp } from 'node:fs/promises';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { transcript, jsonl } from './fixtures.mjs';
 import { readSource } from '../src/claude.mjs';
 import { convertClaude } from '../src/convert.mjs';
-import { planImport, importSession, verifySession, listSessions } from '../src/manager.mjs';
-import { loadRuntime, withStore, exists } from '../src/runtime.mjs';
+import { defaults, planImport, importSession, verifySession, listSessions } from '../src/manager.mjs';
+import { loadRuntime, withStore, withWorkspace, exists } from '../src/runtime.mjs';
 
 let root, runtime, counter = 0;
 before(async () => {
@@ -475,4 +476,166 @@ test('workspace registration asks the user to restart a running local app', asyn
   const quiet = await importSession(idle.source, { ...idle.options, _appRunning: false });
   assert.equal(quiet.workspace.action, 'created-and-attached');
   assert(!(quiet.warnings || []).some(warning => warning.includes('请重启')));
+});
+
+test('pinning preserves imported workspace membership when the app holds an older registry', async () => {
+  const { source, options, sourceCwd } = await workspaceCase('pin-stale-app', ['project']);
+  const planned = await planImport(source, options);
+  await withWorkspace(runtime, defaults(options), async staleRegistry => {
+    const rpc = async (method, args) => {
+      if (method === 'session/projections') return { kind: 'sequenced', asOfSeq: planned.plan.events.length - 1, values: {} };
+      if (method === 'session/page') return { records: planned.plan.events.map(event => ({ type: 'event', event })), hasMore: false };
+      if (method === 'session/list') return { items: [{ sessionId: planned.summary.id }] };
+      if (method === 'workspace/pinSession') return staleRegistry.pinSession(args.request.sessionId);
+      throw new Error(`Unexpected RPC: ${method}`);
+    };
+    const result = await importSession(source, { ...options, pin: true, _rpc: rpc, _appRunning: true });
+    const registry = JSON.parse(await readFile(join(options.dshHome, 'storages', 'workspace.json')));
+    assert.deepEqual(Object.values(registry.tables.workspaces).find(w => w.path === sourceCwd)?.sessionIds, [result.id]);
+    assert.deepEqual(registry.global.pinnedSessionIds, [result.id]);
+    assert.equal(result.application.historyMatches, true);
+  });
+});
+
+test('workspace failures return a nonzero CLI exit and can retry without rewriting history', {
+  skip: process.platform === 'win32' || process.getuid?.() === 0,
+}, async () => {
+  const { source, options } = await workspaceCase('workspace-failed-cli', ['project']);
+  const storage = join(options.dshHome, 'storages');
+  await chmod(storage, 0o500);
+  try {
+    const cli = spawnSync(process.execPath, ['bin/sessions2dsh.mjs', 'import', source,
+      '--dsh-home', options.dshHome, '--data-dir', options.dataDir, '--write'], { cwd: new URL('..', import.meta.url), encoding: 'utf8' });
+    assert.equal(cli.status, 1, cli.stdout);
+    assert.match(cli.stderr, /工作区.*失败/);
+    const listed = await listSessions({ ...options, from: 'dsh' });
+    assert.equal(listed.length, 1);
+    assert.equal((await verifySession(listed[0].id, options)).importedPrefixMatches, true);
+  } finally { await chmod(storage, 0o700); }
+  const retry = await importSession(source, { ...options, _appRunning: false });
+  assert.equal(retry.status, 'already-imported');
+  assert.equal(retry.workspace.ok, true);
+});
+
+test('batch reports workspace failures separately from successfully imported history', {
+  skip: process.platform === 'win32' || process.getuid?.() === 0,
+}, async () => {
+  const { batchImport } = await import('../src/batch.mjs');
+  const { source, options, directory } = await workspaceCase('workspace-failed-batch', ['project']);
+  const claudeRoot = join(directory, 'projects'); await mkdir(join(claudeRoot, 'example'), { recursive: true });
+  await writeFile(join(claudeRoot, 'example', 'source.jsonl'), await readFile(source));
+  const storage = join(options.dshHome, 'storages'); await chmod(storage, 0o500);
+  try {
+    const report = await batchImport({ ...options, claudeRoot, _appRunning: false });
+    assert.equal(report.ok, false);
+    assert.equal(report.totals.imported, 1);
+    assert.equal(report.totals.workspaceFailed, 1);
+    assert.equal(report.results[0].verification.importedPrefixMatches, true);
+  } finally { await chmod(storage, 0o700); }
+  const retried = await batchImport({ ...options, claudeRoot, _appRunning: true });
+  assert.equal(retried.ok, true);
+  assert.equal(retried.totals.existing, 1);
+  assert.equal(retried.totals.imported, 0);
+  assert.equal(retried.warnings?.length, 1);
+});
+
+test('reimport refuses an explicit cwd change without modifying the target', async () => {
+  const { source, options, directory } = await workspaceCase('cwd-conflict', ['project']);
+  const first = await importSession(source, { ...options, _appRunning: false });
+  const other = join(directory, 'other'); await mkdir(other);
+  await assert.rejects(importSession(source, { ...options, cwd: other }), { code: 'TARGET_CONFLICT' });
+  assert.equal((await verifySession(first.id, options)).currentEvents, first.eventCount);
+});
+
+test('managed fallback sessions can repeat after the default workspace directory disappears', async () => {
+  const { source, options, sourceCwd, directory } = await workspaceCase('old-default-missing', ['project']);
+  await rm(sourceCwd, { recursive: true });
+  const first = await importSession(source, { ...options, _appRunning: false });
+  await rm(join(directory, 'default-workspace'), { recursive: true });
+  const repeat = await importSession(source, { ...options, _appRunning: false });
+  assert.equal(repeat.status, 'already-imported');
+  assert.equal(repeat.cwd, first.cwd);
+  assert.equal(repeat.workspace.status, 'attached');
+});
+
+test('isolated imports and already attached repeats do not request an unnecessary restart', async () => {
+  const { source, options } = await setup();
+  const isolated = await importSession(source, { ...options, write: true, _appRunning: true });
+  assert(!(isolated.warnings || []).some(w => w.includes('请重启')));
+  const grouped = await workspaceCase('repeat-no-restart', ['project']);
+  await importSession(grouped.source, { ...grouped.options, _appRunning: false });
+  const repeat = await importSession(grouped.source, { ...grouped.options, _appRunning: true });
+  assert(!(repeat.warnings || []).some(w => w.includes('请重启')));
+});
+
+test('default backups remain inside the tool directory when its path contains spaces and unicode', async () => {
+  const directory = join(root, 'tool space 中文');
+  await cp(new URL('../src', import.meta.url), join(directory, 'src'), { recursive: true });
+  const copied = await import(pathToFileURL(join(directory, 'src', 'manager.mjs')));
+  assert.equal(copied.defaults().dataDir, join(directory, 'data'));
+});
+
+test('Claude JSONL with invalid UTF-8 is rejected before any import writes', async () => {
+  const rows = transcript('invalid-encoding'); rows[1].message.content = 'before-BAD-after';
+  const { source, options } = await setup(rows);
+  const bytes = await readFile(source); bytes[bytes.indexOf('BAD')] = 0xff; await writeFile(source, bytes);
+  await assert.rejects(importSession(source, { ...options, write: true }), { code: 'INVALID_ENCODING' });
+  assert(!(await exists(options.dataDir))); assert(!(await exists(options.targetRoot)));
+});
+
+test('Claude compaction rejects missing, invalid, or unmappable preserved message UUIDs', async () => {
+  for (const preservedMessages of [{}, { allUuids: 'u1' }, { allUuids: ['unknown'] }, { allUuids: [null] }]) {
+    const rows = transcript('bad-compaction');
+    rows.push({ type: 'system', subtype: 'compact_boundary', uuid: 'boundary', sessionId: 'bad-compaction', compactMetadata: { preservedMessages } });
+    rows.push({ ...rows[1], uuid: 'summary', parentUuid: 'boundary', isCompactSummary: true, timestamp: '2026-10-01T00:01:00.000Z', message: { role: 'user', content: 'Summary' } });
+    const { source, options } = await setup(rows);
+    await assert.rejects(importSession(source, { ...options, write: true }), { code: 'COMPACTION_UNSUPPORTED' });
+    assert(!(await exists(options.targetRoot)));
+  }
+});
+
+test('Claude compaction permits known skipped metadata in its preserved UUID list', async () => {
+  const rows = transcript('compact-with-metadata');
+  rows.push({ type: 'system', subtype: 'turn_duration', uuid: 'duration', sessionId: 'compact-with-metadata' });
+  rows.push({ ...rows[1], uuid: 'local', message: { role: 'user', content: '<local-command-stdout>done</local-command-stdout>' } });
+  rows.push({ ...rows[1], uuid: 'meta', isMeta: true });
+  rows.push({ type: 'system', subtype: 'compact_boundary', uuid: 'boundary', sessionId: 'compact-with-metadata',
+    compactMetadata: { preservedMessages: { allUuids: ['a3', 'duration', 'local', 'meta'] } } });
+  rows.push({ ...rows[1], uuid: 'summary', parentUuid: 'boundary', isCompactSummary: true,
+    timestamp: '2026-10-01T00:01:00.000Z', message: { role: 'user', content: 'Summary' } });
+  const { source, options } = await setup(rows);
+  const { plan } = await planImport(source, options);
+  assert.deepEqual(plan.preview.map(m => m.content[0].text), ['Summary', '文件内容是 Hello, session bridge!']);
+});
+
+test('unfinished duplicate Claude tool IDs are rejected even with interrupted recovery enabled', async () => {
+  const rows = transcript('duplicate-open-call');
+  rows[3].message.content.push({ type: 'tool_use', id: 'call-1', name: 'Write', input: { path: 'other.txt', content: 'second call' } });
+  const { source, options } = await setup(rows);
+  await assert.rejects(importSession(source, { ...options, write: true, repairInterrupted: true }), { code: 'DUPLICATE_CALL' });
+  assert(!(await exists(options.targetRoot)));
+});
+
+test('unfinished Claude tool IDs cannot be reused across assistant steps during recovery', async () => {
+  const rows = transcript('duplicate-across-steps');
+  rows.splice(4, 0, { ...rows[3], uuid: 'second-call', message: { ...rows[3].message, id: 'second-step',
+    content: [{ type: 'tool_use', id: 'call-1', name: 'Write', input: { path: 'other.txt', content: 'second call' } }] } });
+  const { source, options } = await setup(rows);
+  await assert.rejects(importSession(source, { ...options, write: true, repairInterrupted: true }), { code: 'DUPLICATE_CALL' });
+  assert(!(await exists(options.targetRoot)));
+});
+
+test('duplicate dialogue UUIDs cannot masquerade as metadata after compaction', async () => {
+  const rows = transcript('duplicate-compaction');
+  rows.push(structuredClone(rows[1]));
+  for (const [index, uuids] of [[], ['u1']].entries()) {
+    const boundary = `boundary-${index}`;
+    rows.push({ type: 'system', subtype: 'compact_boundary', uuid: boundary, sessionId: 'duplicate-compaction',
+      compactMetadata: { preservedMessages: { allUuids: uuids } } });
+    rows.push({ ...rows[1], uuid: `summary-${index}`, parentUuid: boundary, isCompactSummary: true,
+      timestamp: `2026-10-01T00:01:0${index}.000Z`, message: { role: 'user', content: `Summary ${index}` } });
+  }
+  const { source, options } = await setup(rows);
+  await assert.rejects(importSession(source, { ...options, write: true }), { code: 'COMPACTION_UNSUPPORTED' });
+  assert(!(await exists(options.targetRoot)));
 });

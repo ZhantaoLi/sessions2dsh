@@ -1,6 +1,7 @@
 import { readFile, readdir, stat, realpath } from 'node:fs/promises';
 import { resolve, join, basename, isAbsolute } from 'node:path';
 import { createHash } from 'node:crypto';
+import { isUtf8 } from 'node:buffer';
 import { check, ToolError } from './errors.mjs';
 
 export const sha256 = value => createHash('sha256').update(value).digest('hex');
@@ -8,6 +9,7 @@ export const sha256 = value => createHash('sha256').update(value).digest('hex');
 export async function readSource(path) {
   const source = await realpath(resolve(path));
   const bytes = await readFile(source);
+  check(isUtf8(bytes), 'INVALID_ENCODING', '来源 JSONL 不是有效 UTF-8；请检查文件是否损坏。');
   const records = [];
   for (const [index, line] of bytes.toString('utf8').split('\n').entries()) {
     if (!line.trim()) continue;
@@ -33,16 +35,19 @@ export function contentOf(row) {
 }
 
 export function prepareRows(input, options = {}) {
-  const rows = [], skipped = [], warnings = [];
+  const rows = [], skipped = [], warnings = [], metadataUuids = new Map();
   const seen = new Map(), assistantIds = new Set(), humanChildren = new Map(), assistantChildren = new Map();
-  const skip = (row, reason) => skipped.push({ line: row.sourceLine, type: row.type, reason });
+  const skip = (row, reason, metadata = false) => {
+    skipped.push({ line: row.sourceLine, type: row.type, reason });
+    if (metadata && row.uuid) metadataUuids.set(row.uuid, row.sourceLine);
+  };
   for (const row of input.records) {
     if (row.type === 'system' && row.subtype === 'compact_boundary') {
       const summary = input.records.find(r => r.parentUuid === row.uuid && r.isCompactSummary);
       check(summary && row.compactMetadata?.preservedMessages, 'COMPACTION_UNSUPPORTED', `第 ${row.sourceLine} 行缺少可验证的压缩摘要或保留消息清单。`);
-      skip(row, '压缩边界，由紧随的摘要映射为原生 surface replacement'); continue;
+      skip(row, '压缩边界，由紧随的摘要映射为原生 surface replacement', true); continue;
     }
-    if (!['user', 'assistant'].includes(row.type)) { skip(row, '运行元数据，仅保留在来源备份中'); continue; }
+    if (!['user', 'assistant'].includes(row.type)) { skip(row, '运行元数据，仅保留在来源备份中', true); continue; }
     check(!row.isSidechain || input.agentId, 'BRANCH_UNSUPPORTED', `第 ${row.sourceLine} 行是未独立标识的子会话/旁支。`);
     if (row.uuid && seen.has(row.uuid)) {
       const { sourceLine, ...value } = row;
@@ -52,10 +57,10 @@ export function prepareRows(input, options = {}) {
     if (row.uuid) { const { sourceLine, ...value } = row; seen.set(row.uuid, JSON.stringify(value)); }
     const content = contentOf(row);
     if (!rows.length && row.type === 'assistant' && content.every(b => b.type === 'text' && b.text === 'No response requested.')) {
-      skip(row, '本地命令的 No response requested 响应'); continue;
+      skip(row, '本地命令的 No response requested 响应', true); continue;
     }
     if (row.type === 'user' && (row.isMeta || content.some(b => b.type === 'text' && /^\s*<(command-name|local-command-stdout|local-command-caveat)>/.test(b.text)))) {
-      skip(row, 'Claude 本地命令或 meta prompt'); continue;
+      skip(row, 'Claude 本地命令或 meta prompt', true); continue;
     }
     check(Number.isSafeInteger(Date.parse(row.timestamp)) && Date.parse(row.timestamp) >= 0, 'TIMESTAMP', `第 ${row.sourceLine} 行时间戳无效。`);
     if (row.type === 'assistant' && row.parentUuid) {
@@ -90,7 +95,9 @@ export function prepareRows(input, options = {}) {
   check(rows.length && rows[0].type === 'user', 'NO_USER_MESSAGE', '没有可导入的用户对话，或历史不是从用户消息开始。');
   const cwd = options.cwd || rows.find(row => row.cwd)?.cwd;
   check(cwd && isAbsolute(cwd), 'SOURCE_CWD', '源会话没有绝对工作目录；请用 --cwd 明确指定。');
-  return { rows, skipped, warnings, cwd };
+  // A duplicated dialogue UUID must never become a metadata exemption.
+  for (const row of rows) for (const uuid of row.sourceUuids) metadataUuids.delete(uuid);
+  return { rows, skipped, warnings, cwd, metadataUuids };
 }
 
 export async function listClaude(root, options = {}) {

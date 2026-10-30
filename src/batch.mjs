@@ -42,7 +42,8 @@ export async function batchImport(supplied = {}) {
   const candidates = (await listSessions(options)).filter(item => !options.project || [item.project, item.cwd, item.title, item.id].some(value => value?.toLowerCase().includes(options.project.toLowerCase())));
   const report = { schemaVersion: 1, startedAt: new Date().toISOString(), write: !!options.write,
     sourceKind: adapter.kind, targetRoot: options.targetRoot, includeSubagents: !!options.includeSubagents, repairInterrupted: !!options.repairInterrupted,
-    results: [], totals: { candidates: candidates.length, imported: 0, existing: 0, preview: 0, skipped: 0, failed: 0, applicationFailed: 0, journals: 0 } };
+    results: [], totals: { candidates: candidates.length, imported: 0, existing: 0, preview: 0, skipped: 0, failed: 0, applicationFailed: 0, workspaceFailed: 0, journals: 0 } };
+  let workspaceChanged = false;
   async function run(store) {
     for (const candidate of candidates) {
       const item = { source: candidate.source, kind: candidate.kind, sourceSessionId: candidate.id, agentId: candidate.agentId };
@@ -52,6 +53,7 @@ export async function batchImport(supplied = {}) {
         } else {
         check(!candidate.error, 'SOURCE_READ', candidate.error);
         const result = await importSession(candidate.source, { ...options, _store: store, _suppressAppRestartHint: true });
+        workspaceChanged ||= result.workspace?.ok === true && result.workspace.status !== 'attached';
         Object.assign(item, result);
         if (options.write) {
           item.verification = await verifySession(result.id, { ...options, app: false, _store: store });
@@ -59,6 +61,7 @@ export async function batchImport(supplied = {}) {
         }
         report.totals[result.status === 'imported' ? 'imported' : result.status === 'already-imported' ? 'existing' : 'preview']++;
         if (result.application?.ok === false) report.totals.applicationFailed++;
+        if (result.workspace?.ok === false) report.totals.workspaceFailed++;
         report.totals.journals += item.journals?.length || 0;
         }
       } catch (error) {
@@ -73,11 +76,11 @@ export async function batchImport(supplied = {}) {
   if (options.write || await exists(options.targetRoot)) await withStore(runtime, options.targetRoot, run);
   else await run(undefined); // Read-only preview must not create the destination.
   report.finishedAt = new Date().toISOString();
-  if (report.totals.imported > 0 && options.workspaceSync &&
+  if (workspaceChanged &&
     (options._appRunning === undefined ? await appIsRunning(options.appLog) : options._appRunning)) {
     report.warnings = [APP_RESTART_HINT];
   }
-  report.ok = !report.totals.failed && !report.totals.applicationFailed;
+  report.ok = !report.totals.failed && !report.totals.applicationFailed && !report.totals.workspaceFailed;
   await saveReport(options.report, report);
   return report;
 }

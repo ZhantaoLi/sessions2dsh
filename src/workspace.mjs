@@ -59,14 +59,23 @@ export function uniqueWorkspaceTitle(cwd, takenTitles) {
 
 export async function syncWorkspace(plan, options, runtime) {
   if (!options.workspaceSync || !plan.workspace) return null;
-  const info = plan.workspace;
+  const { status: _status, error: _error, code: _code, ok: _ok, ...info } = plan.workspace;
   return withWorkspace(runtime, workspaceOptions(options), async registry => {
     const matched = await registry.resolveByPath(info.cwd);
     const workspace = matched || await registry.create(info.cwd,
       uniqueWorkspaceTitle(info.cwd, new Set(registry.list().map(entity => entity.title))));
     check(workspace, 'WORKSPACE_DEFAULT', `找不到可用工作区：${info.cwd}`);
     await workspace.attachSession(plan.header.id);
-    return { ...info, workspaceId: String(workspace.id), workspaceTitle: workspace.title,
+    return { ...info, ok: true, workspaceId: String(workspace.id), workspaceTitle: workspace.title,
       action: info.action === 'fallback-default-and-attach' ? info.action : matched ? 'matched-and-attached' : 'created-and-attached' };
+  });
+}
+
+/** Read the latest on-disk registry; a running app may still hold an older copy. */
+export async function pinImportedSession(id, options, runtime) {
+  return withWorkspace(runtime, workspaceOptions(options), async registry => {
+    const changed = !registry.pinnedSessionIds.includes(id);
+    await registry.pinSession(id);
+    return { ok: true, pinned: true, changed };
   });
 }

@@ -6,6 +6,11 @@ export function stableUuid(value) {
   const h = sha256(value);
   return `${h.slice(0,8)}-${h.slice(8,12)}-8${h.slice(13,16)}-${((parseInt(h[16],16)&3)|8).toString(16)}${h.slice(17,20)}-${h.slice(20,32)}`;
 }
+export function targetSessionId(input) {
+  // This namespace is part of published session identities, not the project name.
+  const identity = `agent-sessions/${input.sourceKind || 'claude'}/v1/${input.sourceSessionId}${input.agentId ? `/agent/${input.agentId}` : ''}`;
+  return `session-${stableUuid(identity)}`;
+}
 function normalizedTitle(value) {
   const cleaned = value.replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, ' ').replace(/\s+/g, ' ').trim();
   let result = '';
@@ -14,12 +19,10 @@ function normalizedTitle(value) {
 }
 
 export function convertClaude(input, runtime, options = {}) {
-  const { rows, skipped, warnings, cwd } = prepareRows(input, options);
+  const { rows, skipped, warnings, cwd, metadataUuids } = prepareRows(input, options);
   check(isAbsolute(cwd), 'SOURCE_CWD', '工作目录必须是绝对路径。');
   const identity = input.sourceSessionId + (input.agentId ? `/agent/${input.agentId}` : '');
-  // The `agent-sessions/...` namespace feeds the derived target session ID. Do not
-  // rename it with the project: changing it would make published sessions look new.
-  const id = `session-${stableUuid(`agent-sessions/claude/v1/${identity}`)}`;
+  const id = targetSessionId(input);
   const firstText = rows[0].message.content.filter(b => b.type === 'text').map(b => b.text).join(' ');
   const title = normalizedTitle(options.title || `${input.agentId ? `[Claude 子代理 ${input.agentId.slice(0, 8)}]` : '[Claude]'} ${firstText || input.sourceSessionId}`);
   const header = { version: 4, id, createdAt: Date.parse(rows[0].timestamp), cwd, isSeeded: false, delegationDepth: 0, agentPreset: 'standard' };
@@ -27,6 +30,8 @@ export function convertClaude(input, runtime, options = {}) {
   // Native construction adds seq 0 (session/end-seed), required by persistence.
   const events = session.snapshotEvents().map(event => ({ ...event, time: header.createdAt }));
   const mapping = [], conversions = [], pending = new Map(), callIds = new Set(), activeCalls = new Map();
+  // Recovery closes a native step, but does not prove a source call completed.
+  const unresolvedCalls = new Set();
   let turn = 0, step = 0, openTurn = false, openStep = false, time = header.createdAt, lastStop;
   const add = (type, data, surface = false) => {
     const event = { ...session.append(type, data, ...(surface ? [surface === true ? { surfaceOp: 'append' } : surface] : [])), time };
@@ -111,7 +116,7 @@ export function convertClaude(input, runtime, options = {}) {
         check(!humanStarted, 'MIXED_CONTENT_ORDER', `第 ${row.sourceLine} 行工具结果出现在用户正文之后，无法安全确定轮次。`);
         const callId = activeCalls.get(block.tool_use_id) || block.tool_use_id;
         check(openStep && pending.has(callId), 'ORPHAN_RESULT', `第 ${row.sourceLine} 行工具结果没有对应的待完成调用。`);
-        time = Date.parse(row.timestamp); pending.delete(callId);
+        time = Date.parse(row.timestamp); pending.delete(callId); unresolvedCalls.delete(block.tool_use_id);
         const message = { ...runtime.createToolResultMessage({ callId, content: resultBlocks(block.content, row.sourceLine), isError: block.is_error === true }),
           id: stableUuid(`${input.sourceSessionId}/${row.sourceUuids[0]}/tool-result/${index}`) };
         record(row, add('tool/result', { turn, step, message }, true), { callId, sourceCallId: block.tool_use_id });
@@ -123,8 +128,16 @@ export function convertClaude(input, runtime, options = {}) {
       let placement = true;
       if (row.isCompactSummary) {
         check(row.compaction, 'COMPACTION_UNSUPPORTED', `第 ${row.sourceLine} 行摘要没有可验证的压缩边界。`);
-        const preserved = new Set(row.compaction.preservedMessages.allUuids || row.compaction.preservedMessages.uuids);
+        const uuids = row.compaction.preservedMessages?.allUuids ?? row.compaction.preservedMessages?.uuids;
+        check(Array.isArray(uuids) && uuids.every(uuid => typeof uuid === 'string' && uuid.length),
+          'COMPACTION_UNSUPPORTED', `第 ${row.sourceLine} 行压缩保留消息清单不是有效 UUID 数组。`);
+        const preserved = new Set(uuids);
         const nodes = [...session.surface.nodes].filter(seq => events[seq].type !== 'system/message');
+        const activeUuids = new Set(mapping.filter(m => nodes.includes(m.targetSeq)).flatMap(m => m.sourceUuids));
+        // Claude's retained list can also include local commands and timing
+        // records. They have no model-input node, but must exist before summary.
+        check(uuids.every(uuid => activeUuids.has(uuid) || metadataUuids.get(uuid) < row.sourceLine),
+          'COMPACTION_UNSUPPORTED', `第 ${row.sourceLine} 行压缩保留清单引用了无法映射的活动消息。`);
         const kept = new Set(mapping.filter(m => m.sourceUuids.some(uuid => preserved.has(uuid))).map(m => m.targetSeq));
         const firstKept = nodes.findIndex(seq => kept.has(seq));
         check(firstKept < 0 || nodes.slice(firstKept).every(seq => kept.has(seq) || events[seq].type === 'user/message'), 'COMPACTION_UNSUPPORTED', '压缩保留区间混有未声明的助手或工具消息。');
@@ -158,12 +171,13 @@ export function convertClaude(input, runtime, options = {}) {
       check(block.type === 'tool_use' && typeof block.id === 'string' && typeof block.name === 'string' && block.input && typeof block.input === 'object' && !Array.isArray(block.input),
         'BLOCK_UNSUPPORTED', `第 ${row.sourceLine} 行助手内容 ${block.type} 无法转换。`);
       let callId = block.id;
-      check(!pending.has(activeCalls.get(block.id)), 'DUPLICATE_CALL', `工具调用 ID ${block.id} 在完成前重复。`);
+      check(!unresolvedCalls.has(block.id), 'DUPLICATE_CALL', `工具调用 ID ${block.id} 在完成前重复。`);
       if (callIds.has(callId)) {
         callId = `import-${stableUuid(`${identity}/${row.sourceUuids[0]}/${block.id}`)}`;
         conversions.push({ line: row.sourceLine, type: 'reused tool call ID → unique occurrence ID', sourceCallId: block.id, callId });
       }
-      callIds.add(callId); activeCalls.set(block.id, callId);
+      check(!callIds.has(callId), 'DUPLICATE_CALL', `工具调用 ID ${block.id} 无法唯一映射。`);
+      callIds.add(callId); activeCalls.set(block.id, callId); pending.set(callId, row.sourceLine); unresolvedCalls.add(block.id);
       return { type: 'tool-call', id: callId, name: block.name, arguments: JSON.stringify(block.input) };
     });
     check(typeof row.message.model === 'string', 'MODEL_METADATA', `第 ${row.sourceLine} 行缺少原模型名称。`);
@@ -182,7 +196,6 @@ export function convertClaude(input, runtime, options = {}) {
       id: stableUuid(`${input.sourceSessionId}/${row.sourceUuids[0]}/assistant`) };
     record(row, add('assistant/message', { turn, step, message, stream: stream.snapshot() }, true), { claudeMessageId: row.message.id || null });
     for (const block of converted.filter(b => b.type === 'tool-call')) {
-      pending.set(block.id, row.sourceLine);
       add('tool/call', { turn, step, callId: block.id, name: block.name, arguments: block.arguments });
     }
   }

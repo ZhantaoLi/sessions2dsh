@@ -238,3 +238,11 @@ test('CodeBuddy subagent path conflicting with explicit main flags is rejected',
   const path = join(subdir, 'agent-conflict.jsonl'); await writeFile(path, jsonl(fixture().map(r => ({ ...r, providerData: { ...r.providerData, isSubAgent: false } }))));
   await assert.rejects(planImport(path, options), { code: 'SOURCE_ID' });
 });
+
+test('CodeBuddy JSONL with invalid UTF-8 is rejected before any import writes', async () => {
+  const rows = fixture(); rows[0].content[0].text = 'before-BAD-after';
+  const { source, options } = await setup(rows);
+  const bytes = await readFile(source); bytes[bytes.indexOf('BAD')] = 0xff; await writeFile(source, bytes);
+  await assert.rejects(importSession(source, { ...options, write: true }), { code: 'INVALID_ENCODING' });
+  assert(!(await exists(options.dataDir))); assert(!(await exists(options.targetRoot)));
+});

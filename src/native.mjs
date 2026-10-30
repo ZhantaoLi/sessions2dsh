@@ -1,5 +1,5 @@
 import { isAbsolute } from 'node:path';
-import { stableUuid } from './convert.mjs';
+import { stableUuid, targetSessionId } from './convert.mjs';
 import { check } from './errors.mjs';
 
 // Source-neutral items: user, assistant (one model step), or tool result.
@@ -10,7 +10,7 @@ export function buildNativeSession(input, runtime, { items, cwd, title, skipped 
   // The `agent-sessions/...` namespace feeds the derived target session ID. Do not
   // rename it with the project: changing it would make published sessions look new.
   const identity = `agent-sessions/${input.sourceKind}/v1/${input.sourceSessionId}${input.agentId ? `/agent/${input.agentId}` : ''}`;
-  const id = `session-${stableUuid(identity)}`;
+  const id = targetSessionId(input);
   const clean = (options.title || title).replace(/[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, ' ').replace(/\s+/g, ' ').trim();
   title = ''; for (const char of clean) { if (Buffer.byteLength(title + char) > 120) break; title += char; }
   check(title, 'TITLE', '标题不能为空。');

@@ -1,5 +1,6 @@
 import { readFile, readdir, realpath, stat } from 'node:fs/promises';
 import { resolve, join, basename, isAbsolute, sep, dirname } from 'node:path';
+import { isUtf8 } from 'node:buffer';
 import { sha256 } from './claude.mjs';
 import { check, ToolError } from './errors.mjs';
 import { buildNativeSession } from './native.mjs';
@@ -12,6 +13,7 @@ const compactEnvelope = r => r.type === 'message' && r.role === 'user' && Array.
 
 export async function readCodeBuddy(path) {
   const source = await realpath(resolve(path)), bytes = await readFile(source), records = [];
+  check(isUtf8(bytes), 'INVALID_ENCODING', '来源 JSONL 不是有效 UTF-8；请检查文件是否损坏。');
   for (const [i, line] of bytes.toString('utf8').split('\n').entries()) {
     if (!line.trim()) continue;
     let row; try { row = JSON.parse(line); } catch { throw new ToolError('INVALID_JSONL', `第 ${i + 1} 行不是完整 JSON；请等待源会话写入结束。`); }

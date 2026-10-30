@@ -1,6 +1,6 @@
 # 多来源会话导入计划
 
-状态更新（2026-10-29）：CodeBuddy CLI 首版已实现并完成隔离验证，限制与证据见 [CodeBuddy 实施记录](CODEBUDDY_IMPLEMENTATION.md) 及 README。Codex 仍为规划。以下保留总体设计目标，部分能力（真实压缩、复杂排队等）尚未实现，不能据此视为当前支持承诺；未向真实 dsh 导入 CodeBuddy 会话。
+状态更新（2026-10-29）：CodeBuddy CLI 首版已实现并完成隔离验证，限制与证据见 [CodeBuddy 实施记录](CODEBUDDY_IMPLEMENTATION.md) 及 README。Codex 仍为规划。以下保留总体设计目标，部分能力（真实压缩、复杂排队等）尚未实现，不能据此视为当前支持承诺；CodeBuddy 已完成隔离与真实 dsh 验证。
 日期：2026-10-29。目标仍为 dsh，工具保持轻量命令行、Node.js、无需新增 npm 依赖。
 
 ## 已核对的现状
@@ -65,7 +65,7 @@ Claude 兼容性单独保护：维持已发布会话的确定 ID、消息 ID 和
 
 把 manager/batch 中直接调用 Claude 的位置改为适配器选择，提取真正通用的来源快照、映射、发布和校验。建立 manifest 新版并继续读取旧版。
 
-保留现有命令习惯，拟定接口如下（尚未实现）：
+保留现有命令习惯。以下 CodeBuddy 接口已实现，Codex 接口仍为拟定：
 
 ```bash
 node bin/sessions2dsh.mjs list --from codex
