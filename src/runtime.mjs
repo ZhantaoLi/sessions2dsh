@@ -1,6 +1,7 @@
 import { createRequire } from 'node:module';
 import { readFile, realpath, access } from 'node:fs/promises';
 import { dirname, join, resolve, delimiter } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { ToolError, check } from './errors.mjs';
 
 export const TESTED_DSH_VERSION = '0.2.1-rc.2';
@@ -35,10 +36,12 @@ export async function loadRuntime(explicit) {
   check(installation.version === TESTED_DSH_VERSION, 'DSH_VERSION', `已安装 dsh ${installation.version}；当前适配器只验证过 ${TESTED_DSH_VERSION}，暂不写入其他版本。`);
   if (cache.has(installation.root)) return cache.get(installation.root);
   const require = createRequire(installation.packagePath);
-  const load = name => import(require.resolve(`@deepseek-ai/${name}`));
+  // require.resolve returns a Windows drive path (D:\...) that the ESM loader rejects as an unknown URL scheme;
+  // pathToFileURL keeps POSIX and Windows both loadable.
+  const load = name => import(pathToFileURL(require.resolve(`@deepseek-ai/${name}`)).href);
   const [cordis, session, llm, persistence, projections, attachment, storage, storageJson, storageDomain, workspace] = await Promise.all([
     load('cordis'), load('dsh-session'), load('dsh-llm'), load('dsh-session-persistence-jsonl'),
-    import(require.resolve('@deepseek-ai/dsh-session-format-catalog/message-projections')),
+    import(pathToFileURL(require.resolve('@deepseek-ai/dsh-session-format-catalog/message-projections')).href),
     load('dsh-attachment-local'), load('dsh-storage'), load('dsh-storage-json'), load('dsh-storage-domain'), load('dsh-workspace'),
   ]);
   check(session.SESSION_FORMAT_VERSION === 4, 'DSH_FORMAT', 'dsh 会话格式不是已验证的 v4。');

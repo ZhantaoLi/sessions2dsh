@@ -2,7 +2,7 @@ import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, writeFile, readFile, rm, stat, chmod, cp } from 'node:fs/promises';
 import { join } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { pathToFileURL, fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { transcript, jsonl } from './fixtures.mjs';
 import { readSource } from '../src/claude.mjs';
@@ -12,7 +12,7 @@ import { loadRuntime, withStore, withWorkspace, exists } from '../src/runtime.mj
 
 let root, runtime, counter = 0;
 before(async () => {
-  const temporaryRoot = new URL('../tmp/tests', import.meta.url).pathname;
+  const temporaryRoot = fileURLToPath(new URL('../tmp/tests', import.meta.url));
   await mkdir(temporaryRoot, { recursive: true });
   root = await mkdtemp(join(temporaryRoot, 'run-'));
   runtime = await loadRuntime();

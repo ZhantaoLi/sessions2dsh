@@ -4,10 +4,11 @@ import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { mkdir, mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { connectApp, inspectApp } from '../src/app.mjs';
 
 test('application verification uses authenticated local API without prompts or tool execution', async () => {
-  const temporaryRoot = new URL('../tmp/tests', import.meta.url).pathname;
+  const temporaryRoot = fileURLToPath(new URL('../tmp/tests', import.meta.url));
   await mkdir(temporaryRoot, { recursive: true });
   const folder = await mkdtemp(join(temporaryRoot, 'app-'));
   const events = [{ type: 'session/end-seed', seq: 0, time: 1, data: {} }];
@@ -43,7 +44,7 @@ test('application verification uses authenticated local API without prompts or t
 });
 
 test('application launch log cannot redirect credentials to a remote host', async () => {
-  const root = new URL('../tmp/tests', import.meta.url).pathname;
+  const root = fileURLToPath(new URL('../tmp/tests', import.meta.url));
   await mkdir(root, { recursive: true });
   const folder = await mkdtemp(join(root, 'origin-'));
   try {

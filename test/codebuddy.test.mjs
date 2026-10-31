@@ -2,6 +2,7 @@ import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readFile, writeFile, rm, copyFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { planImport, importSession, verifySession, listSessions } from '../src/manager.mjs';
 import { batchImport } from '../src/batch.mjs';
@@ -10,7 +11,7 @@ import { loadRuntime, withStore, exists } from '../src/runtime.mjs';
 let root, runtime, seq = 0;
 before(async () => {
   await mkdir(new URL('../tmp/tests/', import.meta.url), { recursive: true });
-  root = await mkdtemp(new URL('../tmp/tests/codebuddy-', import.meta.url).pathname);
+  root = await mkdtemp(fileURLToPath(new URL('../tmp/tests/codebuddy-', import.meta.url)));
   runtime = await loadRuntime();
 });
 after(async () => { if (root) await rm(root, { recursive: true, force: true }); });
