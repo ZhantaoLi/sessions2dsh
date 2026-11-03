@@ -11,7 +11,7 @@ const nonempty = value => typeof value === 'string' && value.length > 0;
 const knownSummary = r => r.type === 'summary' && ['initial-user-message', 'periodic', 'pre-compact'].includes(r.providerData?.source) && typeof r.summary === 'string';
 const compactEnvelope = r => r.type === 'message' && r.role === 'user' && Array.isArray(r.content) && r.content.some(b => /<cb_summary\b|<conversation_history_summary\b|data-role=["']compact-summary["']/i.test(b.text || ''));
 
-export async function readCodeBuddy(path) {
+export async function readCodeBuddy(path, options = {}) {
   const source = await realpath(resolve(path)), bytes = await readFile(source), records = [];
   check(isUtf8(bytes), 'INVALID_ENCODING', '来源 JSONL 不是有效 UTF-8；请检查文件是否损坏。');
   for (const [i, line] of bytes.toString('utf8').split('\n').entries()) {
@@ -24,7 +24,7 @@ export async function readCodeBuddy(path) {
   const unknown = records.find(r => !semantic.has(r.type) && !metadata.has(r.type) && !knownSummary(r));
   check(!unknown, 'RECORD_UNSUPPORTED', `第 ${unknown?.sourceLine} 行未知 CodeBuddy 记录或摘要语义：${unknown?.type}。`);
   const compact = records.find(r => compactEnvelope(r) || r.providerData?.isCompacted || r.providerData?.isSummary || r.providerData?.isCompactInternal || r.providerData?.compactType !== undefined || r.providerData?.agent === 'compact');
-  check(!compact, 'COMPACTION_UNSUPPORTED', `第 ${compact?.sourceLine} 行包含真实压缩边界或恢复信封，首版尚不能准确重建活动上下文。`);
+  check(!compact || options.bestEffort, 'COMPACTION_UNSUPPORTED', `第 ${compact?.sourceLine} 行包含真实压缩边界或恢复信封，首版尚不能准确重建活动上下文。确认可接受后加 --best-effort。`);
   const retired = records.find(r => r.providerData?.truncated !== undefined || r.providerData?.discard !== undefined);
   check(!retired, 'CONTEXT_UNSUPPORTED', `第 ${retired?.sourceLine} 行含 truncated/discard 历史淘汰标记，尚不能重建其生效范围。`);
   const ids = new Set(records.filter(r => semantic.has(r.type)).map(r => r.sessionId));
@@ -50,7 +50,8 @@ function textContent(content, types, line) {
   });
 }
 
-async function fullToolOutput(input, row, conversions) {
+async function fullToolOutput(input, row, context) {
+  const { conversions, warnings, bestEffort } = context;
   const text = row.output.text;
   if (!text.trimStart().startsWith('<persisted-output>')) return text;
   const matches = [...text.matchAll(/Full output saved to: ([^\r\n]+)/g)];
@@ -65,19 +66,42 @@ async function fullToolOutput(input, row, conversions) {
     check(source.startsWith(allowed + sep) && dirname(source) === allowed, 'EXTERNAL_RESULT', '外置结果不能通过符号链接离开来源会话。');
     bytes = await readFile(source);
     new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-  } catch (e) { throw new ToolError('EXTERNAL_RESULT', `第 ${row.sourceLine} 行外置结果缺失、路径越界或不是 UTF-8 文本；未使用截断预览替代。`); }
+  } catch (e) {
+    // --best-effort: the persisted file is unreachable. Keep the truncated preview
+    // the source already carries rather than inventing or dropping content.
+    if (!bestEffort) throw new ToolError('EXTERNAL_RESULT', `第 ${row.sourceLine} 行外置结果缺失、路径越界或不是 UTF-8 文本；未使用截断预览替代。`);
+    conversions.push({ line: row.sourceLine, type: 'external tool result unreadable → truncated preview kept', reference });
+    warnings.push(`第 ${row.sourceLine} 行外置结果不可读（${e.code || e.message}）；按 --best-effort 保留来源中的截断预览。`);
+    return text;
+  }
   if (!input.files.some(f => f.source === source)) input.files.push({ source, reference, bytes, sha256: sha256(bytes), backup: `external/${sha256(reference)}.txt` });
   conversions.push({ line: row.sourceLine, type: 'external tool result → full text and source snapshot', source, sha256: sha256(bytes) });
   return bytes.toString('utf8');
 }
 
 export async function prepareCodeBuddy(input, options = {}) {
-  const items = [], skipped = [], warnings = [], conversions = [], seen = new Map(), groupKeys = new Set();
+  const items = [], skipped = [], warnings = [], conversions = [], seen = new Map(), groupKeys = new Map(), knownIds = new Set();
+  const bestEffort = options.bestEffort === true;
+  const context = { conversions, warnings, bestEffort };
   let lastRecord, group;
   const skip = (r, reason) => skipped.push({ line: r.sourceLine, type: r.type, reason });
   for (const row of input.records) {
     const p = row.providerData || {}, line = row.sourceLine;
-    check(!p.isCompacted && !p.isSummary && !p.isCompactInternal && p.compactType === undefined && p.agent !== 'compact', 'COMPACTION_UNSUPPORTED', `第 ${line} 行包含真实压缩边界，首版尚不能准确重建活动上下文。`);
+    const marked = p.isCompacted || p.isSummary || p.isCompactInternal || p.compactType !== undefined || p.agent === 'compact';
+    if (nonempty(row.id)) knownIds.add(row.id);
+    check(!marked || bestEffort, 'COMPACTION_UNSUPPORTED', `第 ${line} 行包含真实压缩边界，首版尚不能准确重建活动上下文。确认可接受后加 --best-effort。`);
+    if (marked && bestEffort) {
+      // --best-effort: a compaction summary is a real user-role row in the log; keep
+      // it as a user message so the archived history stays complete and in order.
+      if (!compactEnvelope(row)) {
+        skip(row, '带压缩标记但不是摘要信封，未作为对话导入');
+        warnings.push(`第 ${line} 行带压缩标记（${p.compactType ?? 'isCompacted'}）且不是摘要信封，未作为对话导入。`);
+        if (nonempty(row.id)) lastRecord = row;
+        continue;
+      }
+      conversions.push({ line, type: `compaction envelope (${p.compactType ?? 'unknown'}) → kept as a user message, earlier history retained` });
+      warnings.push(`第 ${line} 行是压缩摘要信封（${p.compactType ?? 'unknown'}）；按 --best-effort 作为用户消息保留，压缩前的历史一并导入。`);
+    }
     if (row.type === 'summary') {
       check(['initial-user-message', 'periodic', 'pre-compact'].includes(p.source) && typeof row.summary === 'string', 'COMPACTION_UNSUPPORTED', `第 ${line} 行摘要类型未知。`);
       skip(row, 'CodeBuddy 列表摘要，不替换模型上下文'); continue;
@@ -93,8 +117,17 @@ export async function prepareCodeBuddy(input, options = {}) {
     seen.set(row.id, serialized);
     check(Number.isSafeInteger(row.timestamp) && row.timestamp >= 0, 'TIMESTAMP', `第 ${line} 行时间戳不是非负毫秒整数。`);
     // Parent links follow stored history, not timestamps or mainAgent names.
-    check(!lastRecord || row.parentId === lastRecord.id, 'BRANCH_UNSUPPORTED', `第 ${line} 行不是可证明的单链历史（分支、缺失父记录或重置边界）。`);
-    check(lastRecord || !row.parentId, 'BRANCH_UNSUPPORTED', `第 ${line} 行继承了未提供的父历史。`);
+    // A compaction envelope has no parentId; it links through logicalParentId.
+    const parentLink = bestEffort && compactEnvelope(row) ? (row.parentId ?? row.logicalParentId) : row.parentId;
+    if (parentLink !== lastRecord?.id) {
+      // --best-effort: records that are not imported (local commands, metadata) can sit
+      // between a record and its parent. Keep file order instead of refusing, but never
+      // accept a parent that was not already seen earlier in the file.
+      check(bestEffort && (parentLink === undefined || knownIds.has(parentLink)), 'BRANCH_UNSUPPORTED',
+        `第 ${line} 行不是可证明的单链历史（分支、缺失父记录或重置边界）。确认可接受后加 --best-effort。`);
+      conversions.push({ line, type: 'parent link skips unimported records → file order kept' });
+      warnings.push(`第 ${line} 行的父记录不是上一条导入记录；按 --best-effort 保持文件顺序继续。`);
+    }
     lastRecord = row;
     if (row.type === 'message' && row.role === 'user') {
       const content = textContent(row.content, ['input_text'], line);
@@ -111,7 +144,7 @@ export async function prepareCodeBuddy(input, options = {}) {
     if (row.type === 'function_call_result') {
       check(nonempty(row.callId) && nonempty(row.name) && ['completed', 'incomplete'].includes(row.status), 'TOOL_CONTENT', `第 ${line} 行工具结果标识或状态无效。`);
       check(row.output?.type === 'text' && typeof row.output.text === 'string', 'TOOL_CONTENT', `第 ${line} 行工具结果不是已支持的文本。`);
-      items.push({ kind: 'result', callId: row.callId, name: row.name, content: [{ type: 'text', text: await fullToolOutput(input, row, conversions) }], isError: row.status !== 'completed' || !!p.toolResult?.error, time: row.timestamp, ids: [row.id], lines: [line] });
+      items.push({ kind: 'result', callId: row.callId, name: row.name, content: [{ type: 'text', text: await fullToolOutput(input, row, context) }], isError: row.status !== 'completed' || !!p.toolResult?.error, time: row.timestamp, ids: [row.id], lines: [line] });
       group = undefined; continue;
     }
     check(row.type !== 'message' || row.role === 'assistant', 'ROLE_UNSUPPORTED', `第 ${line} 行消息角色不支持。`);
@@ -123,9 +156,15 @@ export async function prepareCodeBuddy(input, options = {}) {
     check(nonempty(p.model), 'MODEL_METADATA', `第 ${line} 行缺少原模型名称，拒绝猜测。`);
     const hasGroup = nonempty(p.messageId) && nonempty(p.conversationRequestId) && Number.isSafeInteger(p.stepSeq);
     const key = hasGroup ? JSON.stringify([p.conversationRequestId, p.messageId, p.stepSeq]) : row.id;
-    if (!group || group.key !== key) {
-      check(!groupKeys.has(key), 'BRANCH_UNSUPPORTED', `第 ${line} 行同一模型步骤非连续复现。`);
-      groupKeys.add(key); group = { kind: 'assistant', key, content: [], model: p.model, time: row.timestamp, ids: [], lines: [], blockTimes: [], completed: false }; items.push(group);
+    if (!group || group.baseKey !== key) {
+      const seenStep = groupKeys.get(key);
+      check(seenStep === undefined || bestEffort, 'BRANCH_UNSUPPORTED', `第 ${line} 行同一模型步骤非连续复现。`);
+      groupKeys.set(key, (seenStep || 0) + 1);
+      if (seenStep !== undefined) {
+        conversions.push({ line, type: `non-contiguous model step → kept as a separate step ${seenStep + 1}, not merged` });
+        warnings.push(`第 ${line} 行的模型步骤被其它记录打断后再次出现；按 --best-effort 拆成独立步骤写入，不合并回原步骤。`);
+      }
+      group = { kind: 'assistant', baseKey: key, key: seenStep ? `${key}#${seenStep + 1}` : key, content: [], model: p.model, time: row.timestamp, ids: [], lines: [], blockTimes: [], completed: false }; items.push(group);
     }
     check(group.model === p.model, 'MODEL_METADATA', `第 ${line} 行同一模型步骤的模型不一致。`);
     let blocks;

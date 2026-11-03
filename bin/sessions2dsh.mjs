@@ -26,6 +26,7 @@ const help = `sessions2dsh — 本地 agent 会话管理（Claude Code / CodeBud
   --messages           预览全部转换后的正文、思考与工具历史
   --include-subagents  list/batch 纳入子代理（默认仅主会话）
   --repair-interrupted 显式为来源缺失结果补“结果未知”的错误记录
+  --best-effort        尽力导入，允许降级：未验证的 dsh 版本、外置结果读不到时保留来源里的截断预览、同一模型步骤被打断时拆成独立步骤
   --report 路径        batch 每完成一个会话就原子更新 JSON 报告
   --reuse-receipt 路径  核对并登记旧工具的导入凭据，保留已续聊的会话
   --json               输出 JSON，便于脚本处理
@@ -39,7 +40,7 @@ const help = `sessions2dsh — 本地 agent 会话管理（Claude Code / CodeBud
   --app-log 路径       dsh Web 启动日志（默认 <dsh-home>/web-launcher.log）
   -h, --help           帮助
 
-当前只适配 dsh 0.2.1-rc.2 / v4。导入不会运行历史工具或自动发起模型请求。
+适配 dsh v4 会话格式（在 0.2.1-rc.2 上验证；不锁版本，格式不符才拒绝）。导入不会运行历史工具或自动发起模型请求。
 `;
 
 function display(result, json) {
@@ -87,6 +88,7 @@ try {
     help: { type: 'boolean', short: 'h' }, json: { type: 'boolean' }, write: { type: 'boolean' },
     app: { type: 'boolean' }, pin: { type: 'boolean' }, messages: { type: 'boolean' },
     'include-subagents': { type: 'boolean' }, 'repair-interrupted': { type: 'boolean' },
+    'best-effort': { type: 'boolean' },
     'workspace-sync': { type: 'boolean' },
     report: { type: 'string' }, 'reuse-receipt': { type: 'string' },
     title: { type: 'string' }, cwd: { type: 'string' }, from: { type: 'string' }, project: { type: 'string' },

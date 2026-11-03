@@ -247,3 +247,46 @@ test('CodeBuddy JSONL with invalid UTF-8 is rejected before any import writes', 
   await assert.rejects(importSession(source, { ...options, write: true }), { code: 'INVALID_ENCODING' });
   assert(!(await exists(options.dataDir))); assert(!(await exists(options.targetRoot)));
 });
+
+test('CodeBuddy best-effort keeps the truncated preview when the external result is unreadable', async () => {
+  const rows = fixture(), { source, options } = await setup(rows);
+  const missing = join(source.slice(0, -6), 'tool-results', 'missing.txt');
+  rows[5].output.text = `<persisted-output>\nFull output saved to: ${missing}\n\nPreview: 摘录\n</persisted-output>`;
+  await writeFile(source, jsonl(rows));
+  await assert.rejects(planImport(source, options), { code: 'EXTERNAL_RESULT' });
+  const plan = await planImport(source, { ...options, bestEffort: true });
+  assert.match(plan.plan.preview.find(m => m.role === 'tool').content[0].text, /Preview: 摘录/);
+  assert(plan.summary.conversions.some(conversion => /truncated preview kept/.test(conversion.type)));
+  assert(plan.summary.warnings.some(warning => /外置结果不可读/.test(warning)));
+  const result = await importSession(source, { ...options, bestEffort: true, write: true });
+  assert.equal(result.status, 'imported'); assert.equal(result.bestEffort, true);
+  assert.equal((await verifySession(result.id, options)).importedPrefixMatches, true);
+});
+
+test('CodeBuddy best-effort splits a non-contiguous model step instead of merging it', async () => {
+  const rows = fixture();
+  rows.push({ ...rows[0], id: 'u2', content: [{ type: 'input_text', text: '再补一点' }] },
+    { ...rows[2], id: 'a1b', content: [{ type: 'output_text', text: '补充。' }] });
+  rows.forEach((row, index) => { if (index) row.parentId = rows[index - 1].id; else delete row.parentId; });
+  const { source, options } = await setup(rows);
+  await assert.rejects(planImport(source, options), { code: 'BRANCH_UNSUPPORTED' });
+  const plan = await planImport(source, { ...options, bestEffort: true });
+  assert(plan.summary.conversions.some(conversion => /non-contiguous model step/.test(conversion.type)));
+  assert.equal(plan.summary.counts.assistants, 3);
+});
+
+test('CodeBuddy best-effort keeps a compaction envelope as a user message and retains earlier history', async () => {
+  const rows = fixture();
+  rows.push({ ...rows[0], id: 'cmp_1', logicalParentId: 'a2',
+    content: [{ type: 'input_text', text: '<cb_summary>旧摘要</cb_summary>' }],
+    providerData: { compactType: 'pre-message-auto', isCompacted: true, isCompactInternal: true } });
+  const { source, options } = await setup(rows);
+  await assert.rejects(planImport(source, options), { code: 'COMPACTION_UNSUPPORTED' });
+  const plan = await planImport(source, { ...options, bestEffort: true });
+  assert(plan.summary.conversions.some(conversion => /compaction envelope/.test(conversion.type)));
+  assert(plan.plan.preview.some(message => JSON.stringify(message.content).includes('旧摘要')));
+  assert.deepEqual(plan.summary.counts, { users: 2, assistants: 2, toolCalls: 2, toolResults: 2, reasoning: 2 });
+  const result = await importSession(source, { ...options, bestEffort: true, write: true });
+  assert.equal(result.status, 'imported');
+  assert.equal((await verifySession(result.id, options)).importedPrefixMatches, true);
+});

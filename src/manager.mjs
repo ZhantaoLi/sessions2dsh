@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { isDeepStrictEqual } from 'node:util';
 import { sha256 } from './claude.mjs';
 import { targetSessionId } from './convert.mjs';
-import { loadRuntime, findRuntime, withStore, exists } from './runtime.mjs';
+import { loadRuntime, findRuntime, withStore, exists, TESTED_DSH_VERSION } from './runtime.mjs';
 import { check, ToolError, errorInfo } from './errors.mjs';
 import { connectApp, inspectApp, appIsRunning } from './app.mjs';
 import { prepareAttachments, publishAttachments, verifyAttachments } from './attachments.mjs';
@@ -71,14 +71,15 @@ function publicPlan(input, plan, options, duplicate) {
     id: plan.header.id, title: plan.title, cwd: plan.header.cwd, ...(plan.workspace ? { originalCwd: plan.workspace.sourceCwd, workspace: plan.workspace } : {}), targetRoot: options.targetRoot,
     dshVersion: options.dshVersion, duplicate, eventCount: plan.events.length, counts: plan.counts,
     skippedRows: plan.skipped.length, conversions: plan.conversions, warnings: plan.warnings,
-    limitations: plan.limitations, ...(options.messages ? { messages: plan.preview } : {}) };
+    limitations: plan.limitations, ...(options.messages ? { messages: plan.preview } : {}),
+    ...(options.bestEffort ? { bestEffort: true } : {}) };
 }
 
 export async function planImport(path, supplied = {}) {
   const options = defaults(supplied);
   const adapter = sourceAdapter(options);
   check(!options.reuseReceipt || adapter.kind === 'claude', 'REUSE_RECEIPT', '--reuse-receipt 仅适用于旧 Claude 试验。');
-  const input = await adapter.read(path);
+  const input = await adapter.read(path, options);
   if (options.expectSha) check(input.sourceSha256 === options.expectSha, 'SOURCE_CHANGED', '源文件已变化，与 --expect-sha 不匹配。');
   const runtime = await loadRuntime(options.runtime);
   const attachments = await prepareAttachments(input, runtime);
@@ -95,6 +96,7 @@ export async function planImport(path, supplied = {}) {
   // has disappeared. Only new imports use the current fallback policy.
   const workspacePlan = managed ? { cwd: managed.header.cwd } : await resolveWorkspaceCwd(sourceCwd, workspaceOptions(options));
   const plan = await adapter.convert(input, runtime, { ...options, ...(workspacePlan.cwd ? { cwd: workspacePlan.cwd } : {}), attachments });
+  if (runtime.version !== TESTED_DSH_VERSION) plan.warnings.push(`dsh ${runtime.version} 与本适配器验证过的 ${TESTED_DSH_VERSION} 不同；已通过 v4 会话格式校验，写入格式以格式版本为准。`);
   if (managed) {
     plan.header = managed.header;
     if (managed.workspace) plan.workspace = managed.workspace;
@@ -294,7 +296,8 @@ export async function doctor(supplied = {}) {
   let installation;
   try { installation = await findRuntime(options.runtime); await loadRuntime(options.runtime); }
   catch (error) { return { ok: false, node: process.version, ...errorInfo(error), installation, paths: options }; }
-  return { ok: true, node: process.version, dshVersion: installation.version, runtime: installation.root,
+  return { ok: true, node: process.version, dshVersion: installation.version, verifiedWith: TESTED_DSH_VERSION, runtime: installation.root,
+    ...(installation.version === TESTED_DSH_VERSION ? {} : { warning: `dsh ${installation.version} 与本适配器验证过的 ${TESTED_DSH_VERSION} 不同；兼容性以 v4 会话格式为准。` }),
     claudeRoot: options.claudeRoot, claudeFound: await exists(options.claudeRoot), targetRoot: options.targetRoot,
     codebuddyRoot: options.codebuddyRoot, codebuddyFound: await exists(options.codebuddyRoot),
     targetFound: await exists(options.targetRoot), dataDir: options.dataDir, appLogFound: await exists(options.appLog) };

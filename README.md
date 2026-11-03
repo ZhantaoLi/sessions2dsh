@@ -7,7 +7,7 @@ Import other agents' session history into DeepSeek Harness.
 ## 环境要求
 
 - Node.js **24+**。
-- 已安装 **`@deepseek-ai/dsh 0.2.1-rc.2`**；当前仅适配此版本的 v4 会话格式。
+- 已安装 **`@deepseek-ai/dsh`**，且其会话格式为 v4（在 `0.2.1-rc.2` 上验证过；不锁版本，格式不符才拒绝）。
 
 ## 快速开始
 

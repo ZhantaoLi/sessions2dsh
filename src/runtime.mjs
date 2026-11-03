@@ -4,6 +4,7 @@ import { dirname, join, resolve, delimiter } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { ToolError, check } from './errors.mjs';
 
+// The dsh build this adapter was verified against. Reported as a warning only.
 export const TESTED_DSH_VERSION = '0.2.1-rc.2';
 const cache = new Map();
 
@@ -33,7 +34,9 @@ export async function findRuntime(explicit = process.env.DSH_PACKAGE_ROOT) {
 export async function loadRuntime(explicit) {
   check(Number(process.versions.node.split('.')[0]) >= 24, 'NODE_VERSION', '需要 Node.js 24 或更新版本（内置 Zstandard）。');
   const installation = await findRuntime(explicit);
-  check(installation.version === TESTED_DSH_VERSION, 'DSH_VERSION', `已安装 dsh ${installation.version}；当前适配器只验证过 ${TESTED_DSH_VERSION}，暂不写入其他版本。`);
+  // No version gate: compatibility is decided by the session format version checked
+  // below. TESTED_DSH_VERSION records the build this adapter was verified against and
+  // only feeds a warning, so a routine dsh upgrade never disables the CLI.
   if (cache.has(installation.root)) return cache.get(installation.root);
   const require = createRequire(installation.packagePath);
   // require.resolve returns a Windows drive path (D:\...) that the ESM loader rejects as an unknown URL scheme;

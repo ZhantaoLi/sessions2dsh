@@ -38,4 +38,4 @@ node bin/sessions2dsh.mjs batch --from codebuddy \
 
 ## 限制
 
-只验 CodeBuddy 2.178.0 projects 格式与 dsh 0.2.1-rc.2/v4。未知语义拒绝；CodeBuddy 图片/文件、真实压缩、复杂排队/分支和自动路径映射尚未实现。插件暂停，Codex 未实现。
+只验 CodeBuddy 2.178.0 projects 格式与 dsh 会话格式 v4（在 0.2.1-rc.2 上验证）。未知语义拒绝；CodeBuddy 图片/文件、自动路径映射尚未实现。真实压缩、复杂分支和缺结果调用默认拒绝，可用 `--best-effort`（配合 `--repair-interrupted`）按降级方式导入并在报告里记录降级点。插件暂停，Codex 未实现。
