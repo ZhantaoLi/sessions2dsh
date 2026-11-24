@@ -26,6 +26,13 @@ export async function prepareAttachments(input, runtime) {
     }
   }
   for (const row of input.records) await walk(row.message?.content);
+  for (const file of input.files || []) {
+    if (!file.mediaType) continue;
+    const key = `file:${file.reference}`;
+    if (images.has(key)) continue;
+    const prepared = await api.prepareImageFile({ data: file.bytes, mediaType: file.mediaType }, service.imageLimits, service.normalizationPolicy);
+    images.set(key, prepared);
+  }
   return images;
 }
 export async function publishAttachments(images, runtime, dshHome) {

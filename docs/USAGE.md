@@ -48,9 +48,9 @@ node bin/sessions2dsh.mjs --help
 | `--workspace-sync` | 使用自定义目标根时启用 dsh 工作区登记；异常 cwd 改写为默认工作区 |
 | `--expect-sha SHA256` | 要求源文件与预览输出的 SHA256 一致，避免审阅后来源变化 |
 | `--claude-root /path/to/projects` | 指定 Claude projects 目录；也尊重 `CLAUDE_CONFIG_DIR` |
-| `--from codebuddy` | list/preview/import/batch 选择 CodeBuddy；省略仍为 Claude |
-| `--source-root /path/to/projects` | 指定所选来源根目录；CodeBuddy 默认 `~/.codebuddy/projects` |
-| `--expect-snapshot-sha SHA256` | 单会话锁定 JSONL 与外置结果的完整快照；CodeBuddy 预览会显示该值 |
+| `--from codebuddy` | list/preview/import/batch 选择 CodeBuddy；`--from agy`（别名 `antigravity`）选择 Antigravity；省略仍为 Claude |
+| `--source-root /path/to/dir` | 指定所选来源根目录；CodeBuddy 默认 `~/.codebuddy/projects`，agy 默认 `~/.gemini/antigravity-cli` |
+| `--expect-snapshot-sha SHA256` | 单会话锁定 JSONL 与外置结果/媒体附件的完整快照；CodeBuddy 与 agy 预览会显示该值 |
 | `--dsh-home /path/to/.dsh` | 指定 dsh home；也尊重 `DSH_HOME` |
 | `--target-root /path/to/sessions` | 单独指定原生会话存储，可用于隔离试验 |
 | `--data-dir /path/to/data` | 指定来源备份和导入清单目录 |
@@ -164,3 +164,22 @@ node bin/sessions2dsh.mjs batch --from codebuddy --write --app --report tmp/code
 空文件、纯元数据及仅本地命令文件在批量中记为 `skipped`，不创建空会话。未知记录、内容块、混合身份、不能确认的父链或模型步骤穿插均逐条失败并继续邻居；存在失败时退出码仍为 1。图片/文件内容块、复杂排队与分支、真正压缩暂未支持。只对稳定快照做一次导入，不自动同步活跃来源。
 
 覆盖面实测（CodeBuddy 2.178.0 projects）：默认扫描 49 份（排除 1 份子代理），14 个可导入、31 个跳过、4 个阻断。隔离验证完成 14 个会话、4,951 条事件、909 次工具调用、1 份外置结果的原生导入/备份/冷读，重跑全部识别为重复。阻断项为外置结果缺失、真实压缩和模型步骤穿插，未靠恢复选项跳过；31 个跳过来自空文件、纯元数据与仅本地命令文件，不会创建空会话。实施记录见 [CODEBUDDY_IMPLEMENTATION.md](CODEBUDDY_IMPLEMENTATION.md)。
+
+## Antigravity（agy）
+
+支持本机 Antigravity CLI（`~/.gemini/antigravity-cli`，可用 `--source-root` 切换到 `~/.gemini/antigravity` 或 `~/.gemini/antigravity-ide`）。正文读取 `brain/<conversation-id>/.system_generated/logs/transcript_full.jsonl`，元数据通过 Node 24 内置 `node:sqlite` 只读查询同级 `conversation_summaries.db`（补齐 `workspace_uris` → `cwd`、标题、运行中状态及父子代理关系；无数据库时可用 `--cwd` 手动指定工作目录）。
+
+```bash
+node bin/sessions2dsh.mjs list --from agy
+node bin/sessions2dsh.mjs preview ~/.gemini/antigravity-cli/brain/<id> --from agy --messages
+node bin/sessions2dsh.mjs import ~/.gemini/antigravity-cli/brain/<id> --from agy --write --app
+
+# 批量预检与导入（含 CHECKPOINT 压缩或运行中快照需显式 --best-effort）
+node bin/sessions2dsh.mjs batch --from agy --report tmp/agy/preflight.json
+node bin/sessions2dsh.mjs batch --from agy --best-effort --write --app --report tmp/agy/import.json
+```
+
+- **消息与工具**：支持 `USER_INPUT`、`PLANNER_RESPONSE`（`model`、`thinking`、`content`、`tool_calls`；旧版本日志缺少 `model` 时记为 `unknown` 并提示，不从当前配置猜测）和按顺序 1:1 配对的 `GENERIC` 工具结果（保留 `DONE`/`ERROR`/`RUNNING` 状态与错误信息，按步号+序号生成确定性 `callId`）。自动剥离 `USER_INPUT` 外层 `<USER_REQUEST>` 及末尾注入的 `<ADDITIONAL_METADATA>` / `<USER_SETTINGS_CHANGE>` 标签（原始带标签内容保留在 `source.jsonl` 备份中）。`ERROR_MESSAGE`（API 重试/内容安全拦截）及被拦截产生的空助手响应仅留原件并给出警告。
+- **系统消息**：跳过框架效率提醒（`Reminder: work efficiently.`），保留后台任务/代理异步通知（`[Message]`）为当前轮次内的 `context`。
+- **本地媒体图片**：`media` 中的 `file://` URI 或本地绝对路径（如 `.user_uploaded/`）经 `realpath` 限定在当前 `brain/<id>/` 内，走原生附件链路在内存规范化并在发布时持久化与冷读校验，同时逐字节备份到 `external/` 并纳入 `--expect-snapshot-sha`。路径越界和远程 URL 始终拒绝；文件缺失默认拒绝，加 `--best-effort` 跳过缺失图片并保留其余文本与警告。
+- **运行中、压缩与子代理**：`CASCADE_RUN_STATUS_RUNNING` 运行中会话和 `CHECKPOINT` 压缩检查点默认阻断，加 `--best-effort` 按当前快照或保留全部历史方式降级导入。`parent_conversation_id` / `nesting_depth > 0` 视为子代理，默认排除，加 `--include-subagents` 纳入。空会话（`step_count = 0` 且无 transcript）在批量中自动记为 `skipped`。

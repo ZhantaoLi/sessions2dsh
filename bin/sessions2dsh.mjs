@@ -4,15 +4,15 @@ import { listSessions, planImport, importSession, verifySession, doctor } from '
 import { errorInfo, check } from '../src/errors.mjs';
 import { batchImport } from '../src/batch.mjs';
 
-const help = `sessions2dsh — 本地 agent 会话管理（Claude Code / CodeBuddy → dsh）
+const help = `sessions2dsh — 本地 agent 会话管理（Claude Code / CodeBuddy / Antigravity → dsh）
 
 用法：
   node bin/sessions2dsh.mjs doctor
-  node bin/sessions2dsh.mjs list [--from claude|codebuddy|dsh] [--project 关键词]
-  node bin/sessions2dsh.mjs preview <会话.jsonl> [--from claude|codebuddy] [--messages]
-  node bin/sessions2dsh.mjs import <会话.jsonl> [--from claude|codebuddy] [--write] [--app] [--pin]
+  node bin/sessions2dsh.mjs list [--from claude|codebuddy|agy|dsh] [--project 关键词]
+  node bin/sessions2dsh.mjs preview <会话.jsonl|会话目录> [--from claude|codebuddy|agy] [--messages]
+  node bin/sessions2dsh.mjs import <会话.jsonl|会话目录> [--from claude|codebuddy|agy] [--write] [--app] [--pin]
   node bin/sessions2dsh.mjs verify <session-ID> [--app]
-  node bin/sessions2dsh.mjs batch [--from claude|codebuddy] [--include-subagents] [--write] [--app]
+  node bin/sessions2dsh.mjs batch [--from claude|codebuddy|agy] [--include-subagents] [--write] [--app]
 
 选项：
   --write              实际新增原生 dsh 会话；省略时仅预览
@@ -20,19 +20,19 @@ const help = `sessions2dsh — 本地 agent 会话管理（Claude Code / CodeBud
   --cwd /绝对目录      覆盖会话工作目录（默认保留来源目录）
   --workspace-sync      对自定义目标根启用 dsh 工作区登记
   --expect-sha SHA256   只导入预览时确认过的来源快照
-  --expect-snapshot-sha SHA256  同时锁定 JSONL 与外置工具结果（CodeBuddy）
+  --expect-snapshot-sha SHA256  同时锁定 JSONL 与外置结果/媒体附件（CodeBuddy / agy）
   --app                用运行中 dsh Web 的 API 检查列表与历史
   --pin                导入后在原生注册表置顶；应用重启后显示（隐含 --app）
   --messages           预览全部转换后的正文、思考与工具历史
   --include-subagents  list/batch 纳入子代理（默认仅主会话）
   --repair-interrupted 显式为来源缺失结果补“结果未知”的错误记录
-  --best-effort        尽力导入，允许降级：未验证的 dsh 版本、外置结果读不到时保留来源里的截断预览、同一模型步骤被打断时拆成独立步骤
+  --best-effort        尽力导入，允许降级：未验证的 dsh 版本、外置结果/媒体读不到时降级保留、压缩边界/运行中快照按现状保留、同一模型步骤被打断时拆成独立步骤
   --report 路径        batch 每完成一个会话就原子更新 JSON 报告
   --reuse-receipt 路径  核对并登记旧工具的导入凭据，保留已续聊的会话
   --json               输出 JSON，便于脚本处理
   --claude-root 路径   Claude projects 目录
-  --from 来源         claude（默认）或 codebuddy；list 另支持 dsh
-  --source-root 路径   当前所选来源的 projects 目录
+  --from 来源         claude（默认）、codebuddy 或 agy（别名 antigravity）；list 另支持 dsh
+  --source-root 路径   当前所选来源的根目录（agy 默认 ~/.gemini/antigravity-cli）
   --dsh-home 路径      dsh home（默认 $DSH_HOME 或 ~/.dsh）
   --target-root 路径   原生会话目录（默认 <dsh-home>/sessions）
   --data-dir 路径      来源备份与导入清单（默认 <工具目录>/data）
@@ -48,7 +48,7 @@ function display(result, json) {
   if (Array.isArray(result)) {
     if (!result.length) { console.log('没有找到会话。'); return; }
     for (const item of result) {
-      console.log(`${item.error ? '[读取失败]' : item.title || item.id || '[空记录]'}\n  ${item.id || ''}  ${item.cwd || item.project || ''}\n  ${item.source || ''}${item.error ? `\n  ${item.error}` : ''}${item.skipReason ? `\n  [跳过] ${item.skipReason}` : ''}`);
+      console.log(`${item.error ? '[读取失败]' : item.title || item.id || '[空记录]'}${item.running ? ' [运行中]' : ''}\n  ${item.id || ''}  ${item.cwd || item.project || ''}\n  ${item.source || ''}${item.error ? `\n  ${item.error}` : ''}${item.skipReason ? `\n  [跳过] ${item.skipReason}` : ''}`);
     }
     console.log(`共 ${result.length} 个会话。`); return;
   }

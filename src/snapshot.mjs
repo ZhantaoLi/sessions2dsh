@@ -15,7 +15,7 @@ export async function checkSnapshot(input) {
 }
 
 export function backupFilePath(directory, name) {
-  check(/^external\/[a-f0-9]{64}\.txt$/.test(name), 'MANIFEST', '外置来源备份名称不合法。');
+  check(/^external\/[a-f0-9]{64}\.(?:txt|png|jpg|jpeg|webp|gif)$/.test(name), 'MANIFEST', '外置来源备份名称不合法。');
   return resolve(join(directory, name));
 }
 

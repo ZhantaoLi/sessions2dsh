@@ -22,6 +22,7 @@ export function defaults(options = {}) {
     ...options,
     claudeRoot: resolve(options.claudeRoot || join(process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude'), 'projects')),
     codebuddyRoot: resolve(options.codebuddyRoot || join(homedir(), '.codebuddy', 'projects')),
+    agyRoot: resolve(options.agyRoot || join(homedir(), '.gemini', 'antigravity-cli')),
     dshHome, targetRoot: resolve(options.targetRoot || join(dshHome, 'sessions')),
     attachmentHome: resolve(options.attachmentHome || (options.targetRoot ? join(resolve(options.targetRoot), '..', 'attachment-home') : dshHome)),
     workspaceStorageRoot: resolve(options.workspaceStorageRoot || join(dshHome, 'storages')),
@@ -91,7 +92,7 @@ export async function planImport(path, supplied = {}) {
     check(!options.cwd || options.cwd === managed.header.cwd || options.cwd === managed.workspace?.sourceCwd,
       'TARGET_CONFLICT', '已有导入记录使用不同的 cwd；不会修改已发布会话或忽略显式覆盖。');
   }
-  const sourceCwd = options.cwd || input.rows?.find(row => row.cwd)?.cwd || input.records?.find(row => row.cwd)?.cwd;
+  const sourceCwd = options.cwd || input.cwd || input.rows?.find(row => row.cwd)?.cwd || input.records?.find(row => row.cwd)?.cwd;
   // Existing imports keep their recorded cwd even if today's default directory
   // has disappeared. Only new imports use the current fallback policy.
   const workspacePlan = managed ? { cwd: managed.header.cwd } : await resolveWorkspaceCwd(sourceCwd, workspaceOptions(options));
@@ -152,7 +153,7 @@ export async function planImport(path, supplied = {}) {
     if (stored) { matchesPrefix(stored, plan); duplicate = true; }
   });
   return { input, runtime, plan, options, attachments, summary: { ...publicPlan(input, plan, { ...options, dshVersion: runtime.version }, duplicate), images: attachments.size,
-    ...(adapter.kind === 'codebuddy' ? { sourceFiles, snapshotSha256: snapshotDigest(input) } : {}),
+    ...(adapter.kind === 'codebuddy' || adapter.kind === 'agy' ? { sourceFiles, snapshotSha256: snapshotDigest(input) } : {}),
     ...(plan.legacyBackup || plan.legacyArtifact ? { legacyArtifact: plan.legacyArtifact || { source: plan.legacyBackup.path, sha256: plan.legacyBackup.sha256 } } : {}) } };
 }
 
@@ -300,5 +301,6 @@ export async function doctor(supplied = {}) {
     ...(installation.version === TESTED_DSH_VERSION ? {} : { warning: `dsh ${installation.version} 与本适配器验证过的 ${TESTED_DSH_VERSION} 不同；兼容性以 v4 会话格式为准。` }),
     claudeRoot: options.claudeRoot, claudeFound: await exists(options.claudeRoot), targetRoot: options.targetRoot,
     codebuddyRoot: options.codebuddyRoot, codebuddyFound: await exists(options.codebuddyRoot),
+    agyRoot: options.agyRoot, agyFound: await exists(options.agyRoot),
     targetFound: await exists(options.targetRoot), dataDir: options.dataDir, appLogFound: await exists(options.appLog) };
 }

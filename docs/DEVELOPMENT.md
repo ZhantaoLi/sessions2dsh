@@ -18,6 +18,7 @@ bin/sessions2dsh.mjs  命令行解析、中文输出和 JSON 接口
 src/claude.mjs          发现与读取 Claude 会话，检查可转换结构
 src/convert.mjs         转换为确定的 dsh 事件及来源映射
 src/codebuddy.mjs       CodeBuddy 发现、记录语义与原生消息归一化
+src/agy.mjs             Antigravity（agy）发现、只读摘要库、本地媒体与原生消息归一化
 src/sources.mjs         内置来源适配器选择
 src/native.mjs          新来源共用的 dsh 原生生命周期构造器
 src/snapshot.mjs        多文件来源快照与外置结果备份验证
