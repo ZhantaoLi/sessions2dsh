@@ -180,6 +180,6 @@ node bin/sessions2dsh.mjs batch --from agy --best-effort --write --app --report 
 ```
 
 - **消息与工具**：支持 `USER_INPUT`、`PLANNER_RESPONSE`（`model`、`thinking`、`content`、`tool_calls`；旧版本日志缺少 `model` 时记为 `unknown` 并提示，不从当前配置猜测）和按顺序 1:1 配对的 `GENERIC` 工具结果（保留 `DONE`/`ERROR`/`RUNNING` 状态与错误信息，按步号+序号生成确定性 `callId`）。自动剥离 `USER_INPUT` 外层 `<USER_REQUEST>` 及末尾注入的 `<ADDITIONAL_METADATA>` / `<USER_SETTINGS_CHANGE>` 标签（原始带标签内容保留在 `source.jsonl` 备份中）。`ERROR_MESSAGE`（API 重试/内容安全拦截）及被拦截产生的空助手响应仅留原件并给出警告。
-- **系统消息**：跳过框架效率提醒（`Reminder: work efficiently.`），保留后台任务/代理异步通知（`[Message]`）为当前轮次内的 `context`。
+- **系统消息**：跳过框架效率提醒（`Reminder: work efficiently.`）与服务重启通知（`[Notice] All your subagents and background tasks have been stopped due to server restart`）；后台任务/代理异步通知（`[Message]`）剥离 `<SYSTEM_MESSAGE>` 外壳后以原生 `developer/message` 保留在当前轮次内，不冒充用户发言。
 - **本地媒体图片**：`media` 中的 `file://` URI 或本地绝对路径（如 `.user_uploaded/`）经 `realpath` 限定在当前 `brain/<id>/` 内，走原生附件链路在内存规范化并在发布时持久化与冷读校验，同时逐字节备份到 `external/` 并纳入 `--expect-snapshot-sha`。路径越界和远程 URL 始终拒绝；文件缺失默认拒绝，加 `--best-effort` 跳过缺失图片并保留其余文本与警告。
 - **运行中、压缩与子代理**：`CASCADE_RUN_STATUS_RUNNING` 运行中会话和 `CHECKPOINT` 压缩检查点默认阻断，加 `--best-effort` 按当前快照或保留全部历史方式降级导入。`parent_conversation_id` / `nesting_depth > 0` 视为子代理，默认排除，加 `--include-subagents` 纳入。空会话（`step_count = 0` 且无 transcript）在批量中自动记为 `skipped`。

@@ -57,6 +57,12 @@ export function buildNativeSession(input, runtime, { items, cwd, title, skipped 
       check(openTurn, 'ORPHAN_CONTEXT', `第 ${item.lines[0]} 行注入上下文没有用户轮次。`);
       time = item.time;
       record(item, add('user/message', { ...runtime.createUserMessage({ content: item.content, source: { kind: 'user' } }), id: messageId(item, 'context') }, true));
+    } else if (item.kind === 'developer') {
+      check(openTurn, 'ORPHAN_CONTEXT', `第 ${item.lines[0]} 行系统上下文没有用户轮次。`);
+      closeStep(); time = item.time; step++;
+      add('step/start', { turn, step });
+      record(item, add('developer/message', { turn, step, message: { ...runtime.createDeveloperMessage({ content: item.content, source: { kind: 'user' } }), id: messageId(item, 'developer') } }, true));
+      add('step/end', { turn, step });
     } else if (item.kind === 'result') {
       const callId = activeCalls.get(item.callId);
       check(openStep && pending.has(callId), 'ORPHAN_RESULT', `第 ${item.lines[0]} 行工具结果没有对应的待完成调用。`);
@@ -98,6 +104,7 @@ export function buildNativeSession(input, runtime, { items, cwd, title, skipped 
   const counts = { users: 0, assistants: 0, toolCalls: 0, toolResults: 0, reasoning: 0 };
   for (const item of items) {
     if (item.kind === 'user' || item.kind === 'context') counts.users++;
+    else if (item.kind === 'developer') continue;
     else if (item.kind === 'result') counts.toolResults++;
     else { counts.assistants++; counts.reasoning += item.content.filter(b => b.type === 'reasoning').length; counts.toolCalls += item.content.filter(b => b.type === 'tool-call').length; }
   }

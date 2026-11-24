@@ -220,7 +220,7 @@ test('agy rejects missing or escaping media by default, and degrades cleanly und
   }
 });
 
-test('agy preserves async [Message] SYSTEM_MESSAGE as in-turn context even after assistant text and supports cold read', async () => {
+test('agy preserves async [Message] SYSTEM_MESSAGE as unwrapped developer message, skips server restart notices, and supports cold read', async () => {
   const rows = [
     { step_index: 0, source: 'USER_EXPLICIT', type: 'USER_INPUT', status: 'DONE', created_at: iso(0), content: '跑一个后台任务' },
     { step_index: 1, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: iso(1), model: 'gemini-4-neon-high',
@@ -228,14 +228,20 @@ test('agy preserves async [Message] SYSTEM_MESSAGE as in-turn context even after
     { step_index: 2, source: 'MODEL', type: 'GENERIC', status: 'RUNNING', created_at: iso(2), content: 'Command running in background (task-2)' },
     { step_index: 3, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: iso(3), model: 'gemini-4-neon-high', content: '已后台启动，等待通知。' },
     { step_index: 4, source: 'SYSTEM', type: 'SYSTEM_MESSAGE', status: 'DONE', created_at: iso(4),
-      content: 'The following is a <SYSTEM_MESSAGE> not actually sent by the user.\n\n<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-20T10:00:04Z sender=task-2\nBackground command exited with code 0.\n</SYSTEM_MESSAGE>' },
-    { step_index: 5, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: iso(5), model: 'gemini-4-neon-high', content: '后台任务已成功完成。' },
+      content: 'The following is a <SYSTEM_MESSAGE> not actually sent by the user.\n\n<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-20T10:00:04Z sender=system priority=MESSAGE_PRIORITY_LOW content=[Notice] All your subagents and background tasks have been stopped due to server restart.\n</SYSTEM_MESSAGE>' },
+    { step_index: 5, source: 'SYSTEM', type: 'SYSTEM_MESSAGE', status: 'DONE', created_at: iso(5),
+      content: 'The following is a <SYSTEM_MESSAGE> not actually sent by the user.\n\n<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-20T10:00:05Z sender=task-2 priority=MESSAGE_PRIORITY_HIGH content=Background command exited with code 0.\n</SYSTEM_MESSAGE>' },
+    { step_index: 6, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: iso(6), model: 'gemini-4-neon-high', content: '后台任务已成功完成。' },
   ];
   const { source, options } = await setup(rows);
   const { plan } = await planImport(source, options);
-  assert.equal(plan.counts.users, 2);
+  assert.equal(plan.counts.users, 1);
   assert.equal(plan.events.filter(e => e.type === 'turn/start').length, 2); // system head + 1 user turn
-  assert(plan.preview.some(m => m.role === 'user' && m.content.some(b => b.text?.includes('Background command exited'))));
+  const devMessages = plan.preview.filter(m => m.role === 'developer');
+  assert.equal(devMessages.length, 1);
+  assert.equal(devMessages[0].content[0].text, 'Background command exited with code 0.');
+  assert(!JSON.stringify(plan.preview).includes('<SYSTEM_MESSAGE>'));
+  assert(!JSON.stringify(plan.preview).includes('server restart'));
   const res = await importSession(source, { ...options, write: true });
   assert.equal(res.status, 'imported');
   assert.equal((await verifySession(res.id, options)).importedPrefixMatches, true);
@@ -455,10 +461,10 @@ test('agy accepts raw absolute local media paths inside brain dir and skips empt
   await assert.rejects(planImport(remote.source, remote.options), { code: 'EXTERNAL_RESULT' });
 });
 
-test('agy subagent starting with SYSTEM_MESSAGE task prompt imports as initial user turn', async () => {
+test('agy subagent starting with SYSTEM_MESSAGE task prompt imports as unwrapped initial user turn', async () => {
   const rows = [
     { step_index: 0, source: 'SYSTEM', type: 'SYSTEM_MESSAGE', status: 'DONE', created_at: iso(0),
-      content: 'The following is a <SYSTEM_MESSAGE> not actually sent by the user.\n\n<SYSTEM_MESSAGE>\n[Message] sender=parent\n请调研仓库结构。\n</SYSTEM_MESSAGE>' },
+      content: 'The following is a <SYSTEM_MESSAGE> not actually sent by the user.\n\n<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-20T10:00:00Z sender=parent priority=MESSAGE_PRIORITY_HIGH content=请调研仓库结构。\n</SYSTEM_MESSAGE>' },
     { step_index: 1, source: 'MODEL', type: 'PLANNER_RESPONSE', status: 'DONE', created_at: iso(1), model: 'gemini-4-neon-high',
       content: '已完成仓库调研。' },
   ];
@@ -466,6 +472,8 @@ test('agy subagent starting with SYSTEM_MESSAGE task prompt imports as initial u
     id: 'eeeeeeee-0000-0000-0000-000000000005',
     summary: { title: '子代理调研', parentId: 'aaaaaaaa-0000-0000-0000-000000000001', nestingDepth: 1, stepCount: 2 },
   });
+  const preview = await planImport(source, options);
+  assert.equal(preview.plan.preview.find(m => m.role === 'user').content[0].text, '请调研仓库结构。');
   const res = await importSession(source, { ...options, write: true });
   assert.equal(res.status, 'imported');
   assert.match(res.title, /^\[Antigravity 子代理\]/);

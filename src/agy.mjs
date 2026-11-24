@@ -13,6 +13,22 @@ const mimeExt = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp',
 const trailingInjectedTags = ['ADDITIONAL_METADATA', 'USER_SETTINGS_CHANGE'];
 const nonempty = value => typeof value === 'string' && value.length > 0;
 const isHarnessReminder = text => /Reminder:\s*work efficiently\./.test(text) && !text.includes('[Message]');
+const isServerRestartNotice = text => /\[Notice\]\s*All your subagents and background tasks have been stopped due to server restart/i.test(text);
+
+function unwrapSystemMessage(raw) {
+  let text = raw.trim();
+  if (text.endsWith('</SYSTEM_MESSAGE>')) {
+    const idx = text.lastIndexOf('\n<SYSTEM_MESSAGE>');
+    if (idx >= 0) {
+      text = text.slice(idx + '\n<SYSTEM_MESSAGE>'.length, -'</SYSTEM_MESSAGE>'.length).trim();
+    } else if (text.startsWith('<SYSTEM_MESSAGE>')) {
+      text = text.slice('<SYSTEM_MESSAGE>'.length, -'</SYSTEM_MESSAGE>'.length).trim();
+    }
+  }
+  const msgMatch = /^\[Message\]\s+(?:(?:timestamp|sender|priority)=\S+\s+)*content=([\s\S]*)$/.exec(text);
+  if (msgMatch) text = msgMatch[1].trim();
+  return text;
+}
 
 function unwrapUserInput(raw) {
   let rest = raw.trimEnd();
@@ -299,9 +315,14 @@ export async function prepareAgy(input, options = {}) {
         skipped.push({ line, type: row.type, reason: 'Antigravity 运行提醒，仅保留在来源备份中' });
         continue;
       }
+      if (isServerRestartNotice(row.content)) {
+        skipped.push({ line, type: row.type, reason: 'Antigravity 服务重启通知，仅保留在来源备份中' });
+        continue;
+      }
+      const text = unwrapSystemMessage(row.content);
       if (!hasUserTurn) {
         if (input.isSubagent) {
-          items.push({ kind: 'user', content: [{ type: 'text', text: row.content }], time, ids: [stepId], lines: [line] });
+          items.push({ kind: 'user', content: [{ type: 'text', text }], time, ids: [stepId], lines: [line] });
           conversions.push({ line, type: 'Antigravity subagent initial SYSTEM_MESSAGE → initial user task turn' });
           hasUserTurn = true;
           continue;
@@ -310,8 +331,8 @@ export async function prepareAgy(input, options = {}) {
         continue;
       }
       check(pendingTools.length === 0, 'UNFINISHED_TOOL', `第 ${line} 行系统消息出现在工具调用结果收齐之前。`);
-      items.push({ kind: 'context', content: [{ type: 'text', text: row.content }], time, ids: [stepId], lines: [line] });
-      conversions.push({ line, type: 'Antigravity async system message → context in current turn' });
+      items.push({ kind: 'developer', content: [{ type: 'text', text }], time, ids: [stepId], lines: [line] });
+      conversions.push({ line, type: 'Antigravity async SYSTEM_MESSAGE → unwrapped developer message' });
       continue;
     }
     if (row.type === 'ERROR_MESSAGE') {
@@ -325,7 +346,7 @@ export async function prepareAgy(input, options = {}) {
       const text = typeof row.content === 'string' ? row.content : '';
       conversions.push({ line, type: 'Antigravity checkpoint → kept in conversation, earlier history retained' });
       warnings.push(`第 ${line} 行包含压缩检查点（CHECKPOINT）；按 --best-effort 保留摘要正文并保留压缩前历史。`);
-      items.push({ kind: hasUserTurn ? 'context' : 'user', content: [{ type: 'text', text }], time, ids: [stepId], lines: [line] });
+      items.push({ kind: hasUserTurn ? 'developer' : 'user', content: [{ type: 'text', text }], time, ids: [stepId], lines: [line] });
       hasUserTurn = true;
     }
   }
