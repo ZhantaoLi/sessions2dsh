@@ -1,6 +1,6 @@
 # 开发说明
 
-本工具不需要 `npm install`。开发和测试仍需要 Node.js ≥24，以及已安装的 `@deepseek-ai/dsh`（会话格式 v4；0.2.1-rc.2 为已验证版本，其他版本给出提示但不拦截）。
+本工具不需要 `npm install`。开发和测试仍需要 Node.js ≥24，以及已安装的 `@deepseek-ai/dsh`（会话格式 v4；0.2.2-rc.5 为已验证版本，其他版本给出提示但不拦截）。
 
 ```bash
 npm test
@@ -58,6 +58,6 @@ test/                   合成数据与回归测试
 
 ## 后续计划
 
-- [多来源导入](IMPORT_ADAPTERS_PLAN.md)：CodeBuddy 已实现，Codex 仍为规划。
+- [多来源导入](IMPORT_ADAPTERS_PLAN.md)：CodeBuddy 与 Antigravity（agy）已实现，Codex 仍为规划。
 - [dsh 插件入口](DSH_PLUGIN_PLAN.md)：尚未实现。
 - [CodeBuddy 实施记录](CODEBUDDY_IMPLEMENTATION.md)：来源格式与首版验收范围。

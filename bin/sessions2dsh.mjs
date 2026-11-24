@@ -40,7 +40,7 @@ const help = `sessions2dsh — 本地 agent 会话管理（Claude Code / CodeBud
   --app-log 路径       dsh Web 启动日志（默认 <dsh-home>/web-launcher.log）
   -h, --help           帮助
 
-适配 dsh v4 会话格式（在 0.2.1-rc.2 上验证；不锁版本，格式不符才拒绝）。导入不会运行历史工具或自动发起模型请求。
+适配 dsh v4 会话格式（在 0.2.2-rc.5 上验证；不锁版本，格式不符才拒绝）。导入不会运行历史工具或自动发起模型请求。
 `;
 
 function display(result, json) {

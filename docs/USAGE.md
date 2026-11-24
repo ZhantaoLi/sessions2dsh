@@ -48,13 +48,14 @@ node bin/sessions2dsh.mjs --help
 | `--workspace-sync` | 使用自定义目标根时启用 dsh 工作区登记；异常 cwd 改写为默认工作区 |
 | `--expect-sha SHA256` | 要求源文件与预览输出的 SHA256 一致，避免审阅后来源变化 |
 | `--claude-root /path/to/projects` | 指定 Claude projects 目录；也尊重 `CLAUDE_CONFIG_DIR` |
-| `--from codebuddy` | list/preview/import/batch 选择 CodeBuddy；`--from agy`（别名 `antigravity`）选择 Antigravity；省略仍为 Claude |
+| `--from <来源>` | list/preview/import/batch 选择 `claude`（默认）、`codebuddy` 或 `agy`（别名 `antigravity`）；list 另支持 `dsh` |
 | `--source-root /path/to/dir` | 指定所选来源根目录；CodeBuddy 默认 `~/.codebuddy/projects`，agy 默认 `~/.gemini/antigravity-cli` |
 | `--expect-snapshot-sha SHA256` | 单会话锁定 JSONL 与外置结果/媒体附件的完整快照；CodeBuddy 与 agy 预览会显示该值 |
+| `--best-effort` | 尽力导入允许降级（CodeBuddy 外置结果缺失保留截断预览、非连续步骤拆分、压缩信封保留；agy 缺失媒体跳过、`CHECKPOINT` 压缩与运行中快照按现状保留）；所有降级点均写入警告与转换记录 |
 | `--dsh-home /path/to/.dsh` | 指定 dsh home；也尊重 `DSH_HOME` |
 | `--target-root /path/to/sessions` | 单独指定原生会话存储，可用于隔离试验 |
 | `--data-dir /path/to/data` | 指定来源备份和导入清单目录 |
-| `--runtime /path/to/@deepseek-ai/dsh` | 指定已有 dsh 安装，不下载任何代码 |
+| `--runtime /path/to/@deepseek-ai/dsh` | 指定已有 dsh 安装，不下载任何代码（也尊重 `DSH_PACKAGE_ROOT`；Windows 仅装 Desktop 版时需指向独立 npm 包） |
 | `--app-log /path/to/launcher.log` | 指定 dsh Web 启动日志；认证数据仅留在内存中 |
 
 覆盖工作目录会改变应用之后执行任务的起始目录。它不会移动原项目文件。使用默认 dsh 根目录时，工具会为新导入会话登记 cwd 对应的工作区；cwd 不存在或不是目录时，清单保留 `originalCwd`，但新会话头部改写为 dsh 注册表中的默认工作区，以便应用分组。已有导入记录和现有 Claude 会话不会因重跑而整理。使用自定义 `--target-root` 时默认关闭工作区同步，可加 `--workspace-sync` 显式启用，并确保 `--dsh-home` 指向对应的 dsh 根目录。应用列表在冷态首次出现时可能尚无标题缓存，`--app` 会通过原生投影读取进行校验；`--pin` 可使其容易找到。刷新 dsh 界面后按标题或 ID 查找。
@@ -182,4 +183,5 @@ node bin/sessions2dsh.mjs batch --from agy --best-effort --write --app --report 
 - **消息与工具**：支持 `USER_INPUT`、`PLANNER_RESPONSE`（`model`、`thinking`、`content`、`tool_calls`；旧版本日志缺少 `model` 时记为 `unknown` 并提示，不从当前配置猜测）和按顺序 1:1 配对的 `GENERIC` 工具结果（保留 `DONE`/`ERROR`/`RUNNING` 状态与错误信息，按步号+序号生成确定性 `callId`）。自动剥离 `USER_INPUT` 外层 `<USER_REQUEST>` 及末尾注入的 `<ADDITIONAL_METADATA>` / `<USER_SETTINGS_CHANGE>` 标签（原始带标签内容保留在 `source.jsonl` 备份中）。`ERROR_MESSAGE`（API 重试/内容安全拦截）及被拦截产生的空助手响应仅留原件并给出警告。
 - **系统消息**：跳过框架效率提醒（`Reminder: work efficiently.`）与服务重启通知（`[Notice] All your subagents and background tasks have been stopped due to server restart`）；后台任务/代理异步通知（`[Message]`）剥离 `<SYSTEM_MESSAGE>` 外壳后以原生 `developer/message` 保留在当前轮次内，不冒充用户发言。
 - **本地媒体图片**：`media` 中的 `file://` URI 或本地绝对路径（如 `.user_uploaded/`）经 `realpath` 限定在当前 `brain/<id>/` 内，走原生附件链路在内存规范化并在发布时持久化与冷读校验，同时逐字节备份到 `external/` 并纳入 `--expect-snapshot-sha`。路径越界和远程 URL 始终拒绝；文件缺失默认拒绝，加 `--best-effort` 跳过缺失图片并保留其余文本与警告。
-- **运行中、压缩与子代理**：`CASCADE_RUN_STATUS_RUNNING` 运行中会话和 `CHECKPOINT` 压缩检查点默认阻断，加 `--best-effort` 按当前快照或保留全部历史方式降级导入。`parent_conversation_id` / `nesting_depth > 0` 视为子代理，默认排除，加 `--include-subagents` 纳入。空会话（`step_count = 0` 且无 transcript）在批量中自动记为 `skipped`。
+- **运行中、压缩与子代理**：`CASCADE_RUN_STATUS_RUNNING` 运行中会话和 `CHECKPOINT` 压缩检查点默认阻断，加 `--best-effort` 按当前快照或保留全部历史方式降级导入。`parent_conversation_id` / `nesting_depth > 0` 视为子代理，默认排除，加 `--include-subagents` 纳入（子代理以首条 `SYSTEM_MESSAGE` 启动时会自动解包为初始用户任务轮次）。空会话（`step_count = 0` 且无 transcript）在批量中自动记为 `skipped`。
+- **已知边界**：仅适配当前 `transcript_full.jsonl` 协议；早期 `~/.gemini/antigravity` 中采用 `VIEW_FILE` / `RUN_COMMAND` / `EPHEMERAL_MESSAGE` 等独立步类型的旧版日志暂不支持。Windows 上仅安装 DeepSeek Harness Desktop（JS 打包在 `app.asar` 中）时，需配合 `--runtime` 或 `DSH_PACKAGE_ROOT` 指向独立安装的 `@deepseek-ai/dsh`。

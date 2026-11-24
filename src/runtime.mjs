@@ -5,7 +5,7 @@ import { pathToFileURL } from 'node:url';
 import { ToolError, check } from './errors.mjs';
 
 // The dsh build this adapter was verified against. Reported as a warning only.
-export const TESTED_DSH_VERSION = '0.2.1-rc.2';
+export const TESTED_DSH_VERSION = '0.2.2-rc.5';
 const cache = new Map();
 
 export async function findRuntime(explicit = process.env.DSH_PACKAGE_ROOT) {

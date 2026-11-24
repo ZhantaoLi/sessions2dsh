@@ -7,7 +7,7 @@ Import other agents' session history into DeepSeek Harness.
 ## 环境要求
 
 - Node.js **24+**。
-- 已安装 **`@deepseek-ai/dsh`**，且其会话格式为 v4（在 `0.2.1-rc.2` 上验证过；不锁版本，格式不符才拒绝）。
+- 已安装 **`@deepseek-ai/dsh`**，且其会话格式为 v4（在 `0.2.2-rc.5` 上验证过；不锁版本，格式不符才拒绝）。Windows 若仅安装了 Desktop 版（运行时打在 `app.asar` 内），需另备一份独立 `@deepseek-ai/dsh` npm 包并通过 `--runtime` 或 `DSH_PACKAGE_ROOT` 指定。
 
 ## 快速开始
 
@@ -40,7 +40,7 @@ node bin/sessions2dsh.mjs import ~/.gemini/antigravity-cli/brain/<id> --from agy
 # 先预检并查看报告
 node bin/sessions2dsh.mjs batch --report tmp/import/preflight.json
 
-# 确认后导入；CodeBuddy 同样添加 --from codebuddy
+# 确认后导入；CodeBuddy 添加 --from codebuddy，Antigravity 添加 --from agy
 node bin/sessions2dsh.mjs batch --write --report tmp/import/result.json
 ```
 
