@@ -59,10 +59,16 @@ export function buildNativeSession(input, runtime, { items, cwd, title, skipped 
       record(item, add('user/message', { ...runtime.createUserMessage({ content: item.content, source: { kind: 'user' } }), id: messageId(item, 'context') }, true));
     } else if (item.kind === 'developer') {
       check(openTurn, 'ORPHAN_CONTEXT', `第 ${item.lines[0]} 行系统上下文没有用户轮次。`);
-      closeStep(); time = item.time; step++;
-      add('step/start', { turn, step });
-      record(item, add('developer/message', { turn, step, message: { ...runtime.createDeveloperMessage({ content: item.content, source: { kind: 'user' } }), id: messageId(item, 'developer') } }, true));
-      add('step/end', { turn, step });
+      time = item.time;
+      const message = { ...runtime.createDeveloperMessage({ content: item.content, source: { kind: 'user' } }), id: messageId(item, 'developer') };
+      if (openStep && pending.size) {
+        record(item, add('developer/message', { turn, step, message }, true));
+      } else {
+        closeStep(); step++;
+        add('step/start', { turn, step });
+        record(item, add('developer/message', { turn, step, message }, true));
+        add('step/end', { turn, step });
+      }
     } else if (item.kind === 'result') {
       const callId = activeCalls.get(item.callId);
       check(openStep && pending.has(callId), 'ORPHAN_RESULT', `第 ${item.lines[0]} 行工具结果没有对应的待完成调用。`);

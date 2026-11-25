@@ -160,7 +160,7 @@ node bin/sessions2dsh.mjs batch --from codebuddy --write --app --report tmp/code
 
 支持用户 `input_text`、助手 `output_text`、可读 `reasoning_text`、并行 function_call/result。通过 request/message/step 证据合并同一次模型输出，完整保留工具参数字符串（包括空白）、输出及错误状态；不执行旧工具。模型名来自原记录，不从当前模型设置猜测。`mainAgent: "ptc"` 等字符串不是子代理标志；子代理路径与显式布尔标志冲突时拒绝导入。
 
-`summary` 中已核对的 `initial-user-message`、`periodic`、`pre-compact` 是列表摘要，仅备份。真正 compact flags、旧 `<cb_summary>` / `<conversation_history_summary>` 信封、truncated/discard 上下文淘汰标记暂时阻断，避免恢复错误上下文。模型注入的提醒按原 user 角色放入当前轮次；本地命令只备份，不伪造新提问。缺少模型信息的本地 API 错误只留原件并显示警告，不能算作成功模型回答。
+`summary` 中已核对的 `initial-user-message`、`periodic`、`pre-compact` 是列表摘要，仅备份。真正 compact flags、旧 `<cb_summary>` / `<conversation_history_summary>` 信封、truncated/discard 上下文淘汰标记默认阻断（加 `--best-effort` 时摘要信封以 `developer/message` 保留并保留压缩前历史）。模型注入的提醒与任务通知（`isMeta`）剥离 `<system-reminder>` 外壳后以原生 `developer/message` 放入当前轮次，不冒充用户发言；外部通道消息自动剥离 `<channel ...>...</channel>` 包裹，保留真实用户正文；本地命令只备份，不伪造新提问。缺少模型信息的本地 API 错误只留原件并显示警告，不能算作成功模型回答。
 
 `<persisted-output>` 指向的完整文本会导入，同时逐字节备份至导入目录 `external/`，在 manifest 的 `sourceFiles` 中记录路径与 SHA。只读取当前来源会话自己的 `tool-results` 目录，检查 realpath 和 UTF-8；不会自动映射跨机器路径、下载内容或使用截断预览掩盖缺失文件。`verify` 同时校验这些备份及原来源状态；审阅后锁定整个多文件快照应使用 `--expect-snapshot-sha`，`--expect-sha` 仍只锁定 JSONL。
 

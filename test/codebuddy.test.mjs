@@ -153,15 +153,42 @@ test('CodeBuddy unfinished calls need explicit unknown-outcome recovery and inte
   assert.equal((await verifySession(result.id, options)).backupMatches, true);
 });
 
-test('CodeBuddy reminder input retains its original user role without opening a new human turn', async () => {
+test('CodeBuddy reminder input maps to unwrapped developer message without opening a new human turn', async () => {
   const rows = fixture();
-  rows.splice(7, 0, { type: 'message', id: 'reminder', parentId: 't2', sessionId: 'buddy', cwd: '/workspace', timestamp: 1790734400007,
-    role: 'user', content: [{ type: 'input_text', text: '<system-reminder>任务状态</system-reminder>' }], providerData: { isMeta: true, skipRun: true, taskReminderKind: 'todo', startsNewUserRequest: false } });
-  rows[8].parentId = 'reminder';
+  rows.splice(7, 0,
+    { type: 'message', id: 'reminder', parentId: 't2', sessionId: 'buddy', cwd: '/workspace', timestamp: 1790734400007,
+      role: 'user', content: [{ type: 'input_text', text: '<system-reminder>任务状态</system-reminder>' }], providerData: { isMeta: true, skipRun: true, taskReminderKind: 'todo', startsNewUserRequest: false } },
+    { type: 'message', id: 'retry', parentId: 'reminder', sessionId: 'buddy', cwd: '/workspace', timestamp: 1790734400008,
+      role: 'user', content: [{ type: 'input_text', text: '<system-reminder data-role="error-recovery">Network error occurred, please continue</system-reminder>' }], providerData: { isMeta: true, startsNewUserRequest: false } });
+  rows[9].parentId = 'retry';
   const { source, options } = await setup(rows);
   const { plan } = await planImport(source, options);
-  assert(plan.preview.some(m => m.role === 'user' && m.content.some(b => b.text?.includes('任务状态'))));
+  const devs = plan.preview.filter(m => m.role === 'developer');
+  assert.equal(devs.length, 2);
+  assert.equal(devs[0].content[0].text, '任务状态');
+  assert.equal(devs[1].content[0].text, 'Network error occurred, please continue');
+  assert(!JSON.stringify(plan.preview).includes('</system-reminder>'));
+  assert.equal(plan.counts.users, 1);
   assert.equal(plan.events.filter(e => e.type === 'turn/start').length, 2);
+  const res = await importSession(source, { ...options, write: true });
+  assert.equal(res.status, 'imported');
+  assert.equal((await verifySession(res.id, options)).importedPrefixMatches, true);
+});
+
+test('CodeBuddy reminder arriving between parallel tool results stays in the open step without closing pending calls', async () => {
+  const rows = fixture();
+  rows.splice(6, 0, {
+    type: 'message', id: 'mid-rem', parentId: 't1', sessionId: 'buddy', cwd: '/workspace', timestamp: 1790734400006,
+    role: 'user', content: [{ type: 'input_text', text: '<system-reminder>并行工具中间提醒</system-reminder>' }],
+    providerData: { isMeta: true, skipRun: true, taskReminderKind: 'task', startsNewUserRequest: false },
+  });
+  rows[7].parentId = 'mid-rem';
+  const { source, options } = await setup(rows);
+  const res = await importSession(source, { ...options, write: true });
+  assert.equal(res.status, 'imported');
+  assert.equal(res.counts.toolCalls, 2);
+  assert.equal(res.counts.toolResults, 2);
+  assert.equal((await verifySession(res.id, options)).importedPrefixMatches, true);
 });
 
 test('CodeBuddy local API errors are disclosed without inventing a model or successful reply', async () => {
@@ -275,7 +302,7 @@ test('CodeBuddy best-effort splits a non-contiguous model step instead of mergin
   assert.equal(plan.summary.counts.assistants, 3);
 });
 
-test('CodeBuddy best-effort keeps a compaction envelope as a user message and retains earlier history', async () => {
+test('CodeBuddy best-effort keeps a compaction envelope as a developer message and retains earlier history', async () => {
   const rows = fixture();
   rows.push({ ...rows[0], id: 'cmp_1', logicalParentId: 'a2',
     content: [{ type: 'input_text', text: '<cb_summary>旧摘要</cb_summary>' }],
@@ -284,9 +311,21 @@ test('CodeBuddy best-effort keeps a compaction envelope as a user message and re
   await assert.rejects(planImport(source, options), { code: 'COMPACTION_UNSUPPORTED' });
   const plan = await planImport(source, { ...options, bestEffort: true });
   assert(plan.summary.conversions.some(conversion => /compaction envelope/.test(conversion.type)));
-  assert(plan.plan.preview.some(message => JSON.stringify(message.content).includes('旧摘要')));
-  assert.deepEqual(plan.summary.counts, { users: 2, assistants: 2, toolCalls: 2, toolResults: 2, reasoning: 2 });
+  assert(plan.plan.preview.some(message => message.role === 'developer' && JSON.stringify(message.content).includes('旧摘要')));
+  assert.deepEqual(plan.summary.counts, { users: 1, assistants: 2, toolCalls: 2, toolResults: 2, reasoning: 2 });
   const result = await importSession(source, { ...options, bestEffort: true, write: true });
   assert.equal(result.status, 'imported');
   assert.equal((await verifySession(result.id, options)).importedPrefixMatches, true);
+});
+
+test('CodeBuddy unwraps channel plugin envelopes on user messages without losing text', async () => {
+  const rows = fixture();
+  rows[0].content = [{ type: 'input_text', text: '<channel source="wechat" chat_id="wechat_123" sender="u1" context_token="abc=="> test一下 </channel>' }];
+  const { source, options } = await setup(rows);
+  const { plan, summary } = await planImport(source, options);
+  const userMsg = plan.preview.find(m => m.role === 'user');
+  assert.equal(userMsg.content[0].text, 'test一下');
+  assert(!JSON.stringify(plan.preview).includes('</channel>'));
+  assert(summary.conversions.some(c => /channel wrapper/.test(c.type)));
+  assert.match(summary.title, /^\[CodeBuddy\] test一下$/);
 });

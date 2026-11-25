@@ -10,6 +10,16 @@ const metadata = new Set(['session-meta', 'file-history-snapshot', 'model-usage'
 const nonempty = value => typeof value === 'string' && value.length > 0;
 const knownSummary = r => r.type === 'summary' && ['initial-user-message', 'periodic', 'pre-compact'].includes(r.providerData?.source) && typeof r.summary === 'string';
 const compactEnvelope = r => r.type === 'message' && r.role === 'user' && Array.isArray(r.content) && r.content.some(b => /<cb_summary\b|<conversation_history_summary\b|data-role=["']compact-summary["']/i.test(b.text || ''));
+function unwrapSystemReminder(text) {
+  const trimmed = text.trim();
+  const match = /^<system-reminder(?:\s+[^>]*)?>([\s\S]*)<\/system-reminder>$/i.exec(trimmed);
+  return match ? match[1].trim() : text;
+}
+function unwrapChannelMessage(text) {
+  const trimmed = text.trim();
+  const match = /^<channel\s+[^>]*>([\s\S]*)<\/channel>$/i.exec(trimmed);
+  return match ? { text: match[1].trim(), unwrapped: true } : { text, unwrapped: false };
+}
 
 export async function readCodeBuddy(path, options = {}) {
   const source = await realpath(resolve(path)), bytes = await readFile(source), records = [];
@@ -99,8 +109,8 @@ export async function prepareCodeBuddy(input, options = {}) {
         if (nonempty(row.id)) lastRecord = row;
         continue;
       }
-      conversions.push({ line, type: `compaction envelope (${p.compactType ?? 'unknown'}) → kept as a user message, earlier history retained` });
-      warnings.push(`第 ${line} 行是压缩摘要信封（${p.compactType ?? 'unknown'}）；按 --best-effort 作为用户消息保留，压缩前的历史一并导入。`);
+      conversions.push({ line, type: `compaction envelope (${p.compactType ?? 'unknown'}) → kept as a developer message, earlier history retained` });
+      warnings.push(`第 ${line} 行是压缩摘要信封（${p.compactType ?? 'unknown'}）；按 --best-effort 作为开发上下文消息保留，压缩前的历史一并导入。`);
     }
     if (row.type === 'summary') {
       check(['initial-user-message', 'periodic', 'pre-compact'].includes(p.source) && typeof row.summary === 'string', 'COMPACTION_UNSUPPORTED', `第 ${line} 行摘要类型未知。`);
@@ -135,11 +145,24 @@ export async function prepareCodeBuddy(input, options = {}) {
       const context = p.isMeta && (p.skipRun !== true || ['todo', 'task'].includes(p.taskReminderKind) || Array.isArray(p.modRunFeedbackKeys));
       if (context) {
         check(p.startsNewUserRequest !== true, 'META_UNSUPPORTED', `第 ${line} 行注入消息同时声明新用户请求，无法确定轮次。`);
-        items.push({ kind: 'context', content, time: row.timestamp, ids: [row.id], lines: [line] }); group = undefined;
-        conversions.push({ line, type: 'CodeBuddy injected input → original user role in current turn' }); continue;
+        const unwrapped = content.map(b => b.type === 'text' ? { ...b, text: unwrapSystemReminder(b.text) } : b);
+        items.push({ kind: 'developer', content: unwrapped, time: row.timestamp, ids: [row.id], lines: [line] }); group = undefined;
+        conversions.push({ line, type: 'CodeBuddy injected reminder → unwrapped developer message in current turn' }); continue;
       }
       if (p.skipRun || local) { skip(row, '本地命令或不发给模型的附带内容'); continue; }
-      items.push({ kind: 'user', content, time: row.timestamp, ids: [row.id], lines: [line] }); group = undefined; continue;
+      if (bestEffort && (marked || compactEnvelope(row))) {
+        const kind = items.some(i => i.kind === 'user') ? 'developer' : 'user';
+        items.push({ kind, content, time: row.timestamp, ids: [row.id], lines: [line] }); group = undefined; continue;
+      }
+      let channelUnwrapped = false;
+      const userContent = content.map(b => {
+        if (b.type !== 'text') return b;
+        const res = unwrapChannelMessage(b.text);
+        if (res.unwrapped) channelUnwrapped = true;
+        return { ...b, text: res.text };
+      });
+      if (channelUnwrapped) conversions.push({ line, type: 'CodeBuddy channel wrapper → unwrapped user text' });
+      items.push({ kind: 'user', content: userContent, time: row.timestamp, ids: [row.id], lines: [line] }); group = undefined; continue;
     }
     if (row.type === 'function_call_result') {
       check(nonempty(row.callId) && nonempty(row.name) && ['completed', 'incomplete'].includes(row.status), 'TOOL_CONTENT', `第 ${line} 行工具结果标识或状态无效。`);
@@ -210,7 +233,7 @@ export async function listCodeBuddy(root, options = {}) {
           const first = input.records.find(r => r.type === 'message' && r.role === 'user' && !r.providerData?.skipRun && !r.providerData?.isMeta);
           const commandOnly = input.records.every(r => metadata.has(r.type) || knownSummary(r) || (r.type === 'message' && r.role === 'user' && r.providerData?.skipRun === true && !r.providerData?.isMeta));
           sessions.push({ id: input.sourceSessionId, agentId: input.agentId, kind: input.agentId ? 'subagent' : 'main', sourceKind: 'codebuddy', project,
-            cwd: input.records.find(r => r.cwd)?.cwd || '', title: first?.content?.map(b => b.text || '').join(' ').replace(/\s+/g, ' ').slice(0, 100) || basename(path, '.jsonl'),
+            cwd: input.records.find(r => r.cwd)?.cwd || '', title: first?.content?.map(b => unwrapChannelMessage(b.text || '').text).join(' ').replace(/\s+/g, ' ').slice(0, 100) || basename(path, '.jsonl'),
             source: path, bytes: info.size, updatedAt: info.mtime.toISOString(), rows: input.records.length,
             ...(commandOnly ? { skipReason: '只有本地命令，没有模型对话' } : {}) });
         } catch (e) {
