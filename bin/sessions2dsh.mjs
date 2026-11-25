@@ -16,6 +16,8 @@ const help = `sessions2dsh — 本地 agent 会话管理（Claude Code / CodeBud
 
 选项：
   --write              实际新增原生 dsh 会话；省略时仅预览
+  --update             源会话仅尾部追加且目标未产生新对话时原地追加更新；发生 diff 按 --on-conflict 处理
+  --on-conflict 策略   配合 --update：skip（默认，跳过冲突）或 new（按快照确定性 ID 新建会话）
   --title 文本         自定义导入标题
   --cwd /绝对目录      覆盖会话工作目录（默认保留来源目录）
   --workspace-sync      对自定义目标根启用 dsh 工作区登记
@@ -54,14 +56,22 @@ function display(result, json) {
   }
   if ('node' in result) { console.log(JSON.stringify(result, null, 2)); return; }
   if (result.totals) {
-    console.log(`${result.write ? '批量导入' : '批量预览'}：共 ${result.totals.candidates} 个；新增 ${result.totals.imported}，已存在 ${result.totals.existing}，预览 ${result.totals.preview}，跳过 ${result.totals.skipped || 0}，失败 ${result.totals.failed}，工作区登记失败 ${result.totals.workspaceFailed || 0}，应用验证失败 ${result.totals.applicationFailed}；工作流日志备份 ${result.totals.journals} 份。`);
+    console.log(`${result.write ? '批量导入' : '批量预览'}：共 ${result.totals.candidates} 个；新增 ${result.totals.imported}，更新 ${result.totals.updated || 0}，新建 ${result.totals.forked || 0}，已存在 ${result.totals.existing}，预览 ${result.totals.preview}，跳过 ${result.totals.skipped || 0}，冲突跳过 ${result.totals.conflicts || 0}，失败 ${result.totals.failed}，工作区登记失败 ${result.totals.workspaceFailed || 0}，应用验证失败 ${result.totals.applicationFailed}；工作流日志备份 ${result.totals.journals} 份。`);
     for (const item of result.results.filter(r => r.status === 'failed')) console.log(`${item.source}\n  [${item.code}] ${item.message}`);
+    for (const item of result.results.filter(r => r.status === 'skipped-conflict')) console.log(`${item.source}\n  [冲突跳过/${item.conflictReason}] ${item.conflictMessage}`);
     for (const item of result.results.filter(r => r.workspace?.ok === false)) console.error(`${item.source}\n  工作区登记失败：${item.workspace.error}；会话历史已保留，可重试。`);
     for (const warning of result.warnings || []) console.log(`提示：${warning}`);
     return;
   }
-  const labels = { preview: '预览，尚未写入', imported: '导入成功', 'already-imported': '已导入，跳过重复写入', verified: '验证通过' };
+  const labels = {
+    preview: '预览，尚未写入', 'preview-update': '预览原地更新，尚未写入', 'preview-fork': '预览新建会话（发生冲突），尚未写入',
+    imported: '导入成功', updated: '增量更新成功', forked: '已新建会话（保留原会话）',
+    'already-imported': '已导入，跳过重复写入', 'skipped-conflict': '检测到分叉/差异，已跳过', verified: '验证通过',
+  };
   console.log(`${result.ok === false ? '会话历史已导入，部分步骤失败' : labels[result.status] || '预览，尚未写入'}\n标题：${result.title}\nID：${result.id}`);
+  if (result.forkedFrom) console.log(`派生自：${result.forkedFrom}`);
+  if (result.appendedEvents) console.log(`新增事件：${result.appendedEvents} 条`);
+  if (result.conflictReason) console.log(`冲突原因：${result.conflictReason}（${result.conflictMessage || ''}）`);
   if (result.cwd) console.log(`cwd：${result.cwd}`);
   if (result.counts) console.log(`消息：用户 ${result.counts.users}，助手 ${result.counts.assistants}，工具 ${result.counts.toolCalls} 次，思考 ${result.counts.reasoning} 段`);
   if (result.targetRoot) console.log(`目标：${result.targetRoot}`);
@@ -86,6 +96,7 @@ function display(result, json) {
 try {
   const { values, positionals } = parseArgs({ allowPositionals: true, options: {
     help: { type: 'boolean', short: 'h' }, json: { type: 'boolean' }, write: { type: 'boolean' },
+    update: { type: 'boolean' }, 'on-conflict': { type: 'string' },
     app: { type: 'boolean' }, pin: { type: 'boolean' }, messages: { type: 'boolean' },
     'include-subagents': { type: 'boolean' }, 'repair-interrupted': { type: 'boolean' },
     'best-effort': { type: 'boolean' },
@@ -104,6 +115,9 @@ try {
     check(['doctor', 'list', 'preview', 'import', 'verify', 'batch'].includes(command), 'USAGE', `未知命令 ${command}。执行 --help 查看用法。`);
     check(['preview', 'import', 'verify'].includes(command) ? !!argument : !argument, 'USAGE', '此命令的会话路径/ID 参数不正确。');
     check(!values.write || ['import', 'batch'].includes(command), 'USAGE', '--write 只能用于 import/batch。');
+    check(!values.update || ['preview', 'import', 'batch'].includes(command), 'USAGE', '--update 只能用于 preview/import/batch。');
+    check(!values['on-conflict'] || values.update, 'USAGE', '--on-conflict 需要配合 --update 使用。');
+    check(!values['on-conflict'] || ['skip', 'new'].includes(values['on-conflict']), 'USAGE', '--on-conflict 仅支持 skip 或 new。');
     check(!values.pin || (command === 'import' && values.write), 'USAGE', '--pin 只能用于 import --write。');
     const options = Object.fromEntries(Object.entries(values).map(([key, value]) => [key.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase()), value]));
     let result;
@@ -112,7 +126,7 @@ try {
       result = await listSessions(options);
       if (options.project) result = result.filter(item => [item.project, item.cwd, item.title, item.id].some(value => value?.toLowerCase().includes(options.project.toLowerCase())));
     }
-    if (command === 'preview') result = { status: 'preview', ...(await planImport(argument, options)).summary, hint: '未写入任何文件。使用 import <路径> --write 导入。' };
+    if (command === 'preview') result = await importSession(argument, { ...options, write: false });
     if (command === 'import') result = await importSession(argument, options);
     if (command === 'verify') result = await verifySession(argument, options);
     if (command === 'batch') {

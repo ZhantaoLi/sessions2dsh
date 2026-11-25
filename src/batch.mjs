@@ -42,8 +42,9 @@ export async function batchImport(supplied = {}) {
   const candidates = (await listSessions(options)).filter(item => !options.project || [item.project, item.cwd, item.title, item.id].some(value => value?.toLowerCase().includes(options.project.toLowerCase())));
   const report = { schemaVersion: 1, startedAt: new Date().toISOString(), write: !!options.write,
     sourceKind: adapter.kind, targetRoot: options.targetRoot, includeSubagents: !!options.includeSubagents, repairInterrupted: !!options.repairInterrupted,
-    results: [], totals: { candidates: candidates.length, imported: 0, existing: 0, preview: 0, skipped: 0, failed: 0, applicationFailed: 0, workspaceFailed: 0, journals: 0 } };
-  let workspaceChanged = false;
+    ...(options.update ? { update: true, onConflict: options.onConflict || 'skip' } : {}),
+    results: [], totals: { candidates: candidates.length, imported: 0, updated: 0, forked: 0, existing: 0, preview: 0, skipped: 0, conflicts: 0, failed: 0, applicationFailed: 0, workspaceFailed: 0, journals: 0 } };
+  let appRestartNeeded = false;
   async function run(store) {
     for (const candidate of candidates) {
       const item = { source: candidate.source, kind: candidate.kind, sourceSessionId: candidate.id, agentId: candidate.agentId };
@@ -53,13 +54,18 @@ export async function batchImport(supplied = {}) {
         } else {
         check(!candidate.error, 'SOURCE_READ', candidate.error);
         const result = await importSession(candidate.source, { ...options, _store: store, _suppressAppRestartHint: true });
-        workspaceChanged ||= result.workspace?.ok === true && result.workspace.status !== 'attached';
+        appRestartNeeded ||= result.status === 'updated' || (result.workspace?.ok === true && result.workspace.status !== 'attached');
         Object.assign(item, result);
-        if (options.write) {
+        if (options.write && result.status !== 'skipped-conflict') {
           item.verification = await verifySession(result.id, { ...options, app: false, _store: store });
           if (adapter.kind === 'claude' && !candidate.agentId) item.journals = await backupJournals(candidate.source, result.backup);
         }
-        report.totals[result.status === 'imported' ? 'imported' : result.status === 'already-imported' ? 'existing' : 'preview']++;
+        if (result.status === 'imported') report.totals.imported++;
+        else if (result.status === 'updated') report.totals.updated++;
+        else if (result.status === 'forked') report.totals.forked++;
+        else if (result.status === 'already-imported') report.totals.existing++;
+        else if (result.status === 'skipped-conflict') report.totals.conflicts++;
+        else report.totals.preview++;
         if (result.application?.ok === false) report.totals.applicationFailed++;
         if (result.workspace?.ok === false) report.totals.workspaceFailed++;
         report.totals.journals += item.journals?.length || 0;
@@ -76,7 +82,7 @@ export async function batchImport(supplied = {}) {
   if (options.write || await exists(options.targetRoot)) await withStore(runtime, options.targetRoot, run);
   else await run(undefined); // Read-only preview must not create the destination.
   report.finishedAt = new Date().toISOString();
-  if (workspaceChanged &&
+  if (appRestartNeeded &&
     (options._appRunning === undefined ? await appIsRunning(options.appLog) : options._appRunning)) {
     report.warnings = [APP_RESTART_HINT];
   }

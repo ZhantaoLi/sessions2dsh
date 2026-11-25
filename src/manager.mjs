@@ -13,6 +13,7 @@ import { recoverLegacy } from './legacy.mjs';
 import { sourceAdapter } from './sources.mjs';
 import { snapshotDigest, checkSnapshot, backupFilePath, verifyFileBackups, sourceFilesState } from './snapshot.mjs';
 import { resolveWorkspaceCwd, syncWorkspace, workspaceOptions, pinImportedSession } from './workspace.mjs';
+import { evaluateUpdate, forkSessionId, defaultSegments, inferStoredPrefix } from './update.mjs';
 
 export const APP_RESTART_HINT = '请重启 DeepSeek Harness 应用';
 
@@ -38,6 +39,12 @@ function recordPath(options, id) {
 async function writeExclusive(path, bytes) {
   const handle = await open(path, 'wx', 0o600);
   try { await handle.writeFile(bytes); await handle.sync(); } finally { await handle.close(); }
+}
+async function replaceAtomic(path, bytes) {
+  const temporary = `${path}.next`;
+  const handle = await open(temporary, 'w', 0o600);
+  try { await handle.writeFile(bytes); await handle.sync(); } finally { await handle.close(); }
+  await rename(temporary, path);
 }
 async function writeAtomic(path, object) {
   const temporary = `${path}.next`;
@@ -78,16 +85,20 @@ function publicPlan(input, plan, options, duplicate) {
 
 export async function planImport(path, supplied = {}) {
   const options = defaults(supplied);
+  check(!options.onConflict || options.update, 'USAGE', '--on-conflict 需要配合 --update 使用。');
+  const onConflict = options.onConflict || 'skip';
+  check(['skip', 'new'].includes(onConflict), 'USAGE', '--on-conflict 仅支持 skip 或 new。');
   const adapter = sourceAdapter(options);
   check(!options.reuseReceipt || adapter.kind === 'claude', 'REUSE_RECEIPT', '--reuse-receipt 仅适用于旧 Claude 试验。');
   const input = await adapter.read(path, options);
   if (options.expectSha) check(input.sourceSha256 === options.expectSha, 'SOURCE_CHANGED', '源文件已变化，与 --expect-sha 不匹配。');
   const runtime = await loadRuntime(options.runtime);
   const attachments = await prepareAttachments(input, runtime);
-  const managedManifestPath = join(recordPath(options, targetSessionId(input)), 'manifest.json');
+  const baseId = targetSessionId(input);
+  const managedManifestPath = join(recordPath(options, baseId), 'manifest.json');
   const managed = await exists(managedManifestPath) ? JSON.parse(await readFile(managedManifestPath, 'utf8')) : null;
   if (managed) {
-    check(managed.id === targetSessionId(input) && managed.targetRoot === options.targetRoot && managed.header?.id === managed.id,
+    check(managed.id === baseId && managed.targetRoot === options.targetRoot && managed.header?.id === managed.id,
       'MANIFEST', '已有导入记录的 ID 或目标路径不匹配。');
     check(!options.cwd || options.cwd === managed.header.cwd || options.cwd === managed.workspace?.sourceCwd,
       'TARGET_CONFLICT', '已有导入记录使用不同的 cwd；不会修改已发布会话或忽略显式覆盖。');
@@ -96,7 +107,7 @@ export async function planImport(path, supplied = {}) {
   // Existing imports keep their recorded cwd even if today's default directory
   // has disappeared. Only new imports use the current fallback policy.
   const workspacePlan = managed ? { cwd: managed.header.cwd } : await resolveWorkspaceCwd(sourceCwd, workspaceOptions(options));
-  const plan = await adapter.convert(input, runtime, { ...options, ...(workspacePlan.cwd ? { cwd: workspacePlan.cwd } : {}), attachments });
+  let plan = await adapter.convert(input, runtime, { ...options, ...(workspacePlan.cwd ? { cwd: workspacePlan.cwd } : {}), attachments });
   if (runtime.version !== TESTED_DSH_VERSION) plan.warnings.push(`dsh ${runtime.version} 与本适配器验证过的 ${TESTED_DSH_VERSION} 不同；已通过 v4 会话格式校验，写入格式以格式版本为准。`);
   if (managed) {
     plan.header = managed.header;
@@ -107,9 +118,11 @@ export async function planImport(path, supplied = {}) {
   }
   runtime.Session.create(plan.header.id, plan.events, plan.header);
   const sourceFiles = (input.files || []).map(({ bytes, ...file }) => file);
-  if (options.expectSnapshotSha) check(snapshotDigest(input) === options.expectSnapshotSha, 'SOURCE_CHANGED', '来源 JSONL 或外置结果与审阅的完整快照 SHA 不一致。');
+  const snap = snapshotDigest(input);
+  if (options.expectSnapshotSha) check(snap === options.expectSnapshotSha, 'SOURCE_CHANGED', '来源 JSONL 或外置结果与审阅的完整快照 SHA 不一致。');
   let duplicate = false;
   let managedLegacy = false;
+  let updatePlan = null;
   const existingRecord = recordPath(options, plan.header.id);
   if (await exists(join(existingRecord, 'manifest.json'))) {
     const manifest = JSON.parse(await readFile(join(existingRecord, 'manifest.json'), 'utf8'));
@@ -150,17 +163,92 @@ export async function planImport(path, supplied = {}) {
   }
   if (await exists(options.targetRoot)) await targetStore(runtime, options, async store => {
     const stored = await readStored(store, plan.header.id);
-    if (stored) { matchesPrefix(stored, plan); duplicate = true; }
+    if (!stored) return;
+    // Previously updated sessions store their exact target prefix in events.json.
+    if (managed && !managedLegacy && Array.isArray(managed.segments) && managed.segments.length > 1 &&
+      managed.sourceSha256 === input.sourceSha256 && (!managed.snapshotSha256 || managed.snapshotSha256 === snap)) {
+      const savedBytes = await readFile(join(existingRecord, 'events.json'), 'utf8');
+      check(sha256(savedBytes) === managed.eventsSha256, 'BACKUP_CHANGED', '已有转换事件备份校验失败。');
+      plan.events = JSON.parse(savedBytes);
+      matchesPrefix(stored, plan);
+      duplicate = true;
+      return;
+    }
+    if (!options.update) { matchesPrefix(stored, plan); duplicate = true; return; }
+    let evaluation;
+    let adoptedUnmanaged = false;
+    if (managed && await exists(join(existingRecord, 'events.json'))) {
+      const savedText = await readFile(join(existingRecord, 'events.json'), 'utf8');
+      check(sha256(savedText) === managed.eventsSha256, 'BACKUP_CHANGED', '已有转换事件备份校验失败，拒绝原地更新。');
+      const oldEvents = JSON.parse(savedText);
+      evaluation = evaluateUpdate({ stored, oldEvents, manifest: managed, plan, runtime });
+    } else if (isDeepStrictEqual(stored.header, plan.header) && isDeepStrictEqual(stored.events.slice(0, plan.events.length), plan.events)) {
+      evaluation = { action: 'unchanged' };
+    } else {
+      adoptedUnmanaged = true;
+      evaluation = evaluateUpdate({ stored, oldEvents: inferStoredPrefix(stored), manifest: null, plan, runtime });
+    }
+    if (evaluation.action === 'unchanged') {
+      if (managed && await exists(join(existingRecord, 'events.json'))) {
+        plan.events = JSON.parse(await readFile(join(existingRecord, 'events.json'), 'utf8'));
+      }
+      duplicate = true;
+      return;
+    }
+    if (evaluation.action === 'update') {
+      plan.events = evaluation.combinedEvents;
+      const storedTitle = stored.events.find(e => e.type === 'session/title')?.data?.title;
+      plan.title = managed?.title || storedTitle || plan.title;
+      updatePlan = { ...evaluation, adoptedUnmanaged };
+      return;
+    }
+    if (onConflict === 'skip') {
+      updatePlan = { action: 'conflict-skip', reason: evaluation.reason, message: evaluation.message };
+      return;
+    }
+    const forkId = forkSessionId(input, snap);
+    const forkTitle = options.title || `${plan.title} [快照 ${snap.slice(0, 8)}]`;
+    const forkWorkspacePlan = await resolveWorkspaceCwd(sourceCwd, workspaceOptions(options));
+    const forkedPlan = await adapter.convert(input, runtime, {
+      ...options, ...(forkWorkspacePlan.cwd ? { cwd: forkWorkspacePlan.cwd } : {}), attachments,
+      targetIdOverride: forkId, title: forkTitle,
+    });
+    if (runtime.version !== TESTED_DSH_VERSION) forkedPlan.warnings.push(`dsh ${runtime.version} 与本适配器验证过的 ${TESTED_DSH_VERSION} 不同；已通过 v4 会话格式校验，写入格式以格式版本为准。`);
+    if (forkWorkspacePlan.workspace) {
+      forkedPlan.workspace = forkWorkspacePlan.workspace;
+      if (forkWorkspacePlan.warning) forkedPlan.warnings.push(forkWorkspacePlan.warning);
+    }
+    runtime.Session.create(forkedPlan.header.id, forkedPlan.events, forkedPlan.header);
+    const existingFork = await readStored(store, forkId);
+    plan = forkedPlan;
+    if (existingFork) {
+      matchesPrefix(existingFork, plan);
+      duplicate = true;
+      updatePlan = { action: 'fork-existing', forkedFrom: baseId, reason: evaluation.reason };
+    } else {
+      updatePlan = { action: 'fork', forkedFrom: baseId, reason: evaluation.reason, message: evaluation.message };
+    }
   });
-  return { input, runtime, plan, options, attachments, summary: { ...publicPlan(input, plan, { ...options, dshVersion: runtime.version }, duplicate), images: attachments.size,
-    ...(adapter.kind === 'codebuddy' || adapter.kind === 'agy' ? { sourceFiles, snapshotSha256: snapshotDigest(input) } : {}),
+  return { input, runtime, plan, options, attachments, updatePlan, summary: { ...publicPlan(input, plan, { ...options, dshVersion: runtime.version }, duplicate), images: attachments.size,
+    ...(adapter.kind === 'codebuddy' || adapter.kind === 'agy' ? { sourceFiles, snapshotSha256: snap } : {}),
+    ...(updatePlan?.action === 'update' ? { appendedEvents: updatePlan.deltaEvents.length } : {}),
+    ...(updatePlan?.forkedFrom ? { forkedFrom: updatePlan.forkedFrom } : {}),
+    ...(updatePlan?.reason ? { conflictReason: updatePlan.reason } : {}),
+    ...(updatePlan?.message ? { conflictMessage: updatePlan.message } : {}),
     ...(plan.legacyBackup || plan.legacyArtifact ? { legacyArtifact: plan.legacyArtifact || { source: plan.legacyBackup.path, sha256: plan.legacyBackup.sha256 } } : {}) } };
 }
 
 export async function importSession(path, supplied = {}) {
   const prepared = await planImport(path, supplied);
-  const { input, runtime, plan, options, summary, attachments } = prepared;
-  if (!options.write) return { status: 'preview', ...summary, hint: '未写入任何文件。添加 --write 执行导入。' };
+  const { input, runtime, plan, options, summary, attachments, updatePlan } = prepared;
+  if (updatePlan?.action === 'conflict-skip') {
+    return { status: 'skipped-conflict', ok: true, ...summary, hint: '检测到历史差异或目标已续聊，已跳过；如需新建会话请加 --on-conflict new。' };
+  }
+  if (!options.write) {
+    if (updatePlan?.action === 'update') return { status: 'preview-update', ...summary, hint: '未写入任何文件。添加 --write --update 执行原地增量更新。' };
+    if (updatePlan?.action === 'fork') return { status: 'preview-fork', ...summary, hint: '未写入任何文件。添加 --write --update --on-conflict new 新建会话。' };
+    return { status: 'preview', ...summary, hint: '未写入任何文件。添加 --write 执行导入。' };
+  }
   const directory = recordPath(options, plan.header.id);
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const lockPath = join(directory, 'import.lock');
@@ -170,6 +258,68 @@ export async function importSession(path, supplied = {}) {
   try {
     await lock.writeFile(JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
     const manifestPath = join(directory, 'manifest.json');
+    if (updatePlan?.action === 'update') {
+      let manifest = null;
+      if (await exists(manifestPath)) {
+        manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+        check(sha256(await readFile(join(directory, 'source.jsonl'))) === manifest.sourceSha256 &&
+          sha256(await readFile(join(directory, 'events.json'))) === manifest.eventsSha256,
+          'BACKUP_CHANGED', '已有来源备份或转换事件校验失败，拒绝更新。');
+        await verifyFileBackups(directory, manifest.sourceFiles);
+      }
+      await checkSnapshot(input);
+      await publishAttachments(attachments, runtime, options.attachmentHome);
+      for (const file of input.files || []) {
+        const target = backupFilePath(directory, file.backup);
+        await mkdir(join(directory, 'external'), { recursive: true, mode: 0o700 });
+        if (await exists(target)) check(sha256(await readFile(target)) === file.sha256, 'BACKUP_CONFLICT', '外置结果已有不同备份。');
+        else await writeExclusive(target, file.bytes);
+      }
+      await targetStore(runtime, options, async store => {
+        const current = await readStored(store, plan.header.id);
+        check(current, 'TARGET_MISSING', '目标会话不存在，无法更新。');
+        check(current.events.length === updatePlan.combinedEvents.length - updatePlan.deltaEvents.length,
+          'TARGET_CONFLICT', '目标会话在更新期间发生变化；未写入增量事件。');
+        const writer = await store.open(plan.header.id, 'write');
+        try { await writer.append(updatePlan.deltaEvents); await writer.flush(); } finally { await writer.close(); }
+        const published = await readStored(store, plan.header.id);
+        check(published, 'PUBLISH_FAILED', '更新后未发现目标会话。');
+        matchesPrefix(published, plan);
+      });
+      const eventsBytes = Buffer.from(JSON.stringify(plan.events));
+      await replaceAtomic(join(directory, 'source.jsonl'), input.bytes);
+      await replaceAtomic(join(directory, 'events.json'), eventsBytes);
+      const now = new Date().toISOString();
+      const updatedManifest = manifest
+        ? {
+          ...manifest, ...summary, status: 'published',
+          updatedAt: now, updateCount: (manifest.updateCount || 0) + 1,
+          header: plan.header, eventsSha256: sha256(eventsBytes),
+          mapping: plan.mapping, skipped: plan.skipped, segments: updatePlan.nextSegments,
+        }
+        : {
+          schemaVersion: 1, adapterVersion: 2, status: 'published', createdAt: now, publishedAt: now,
+          updatedAt: now, updateCount: 1, adoptedUnmanaged: true,
+          ...summary, attachmentHome: options.attachmentHome, header: plan.header,
+          eventsSha256: sha256(eventsBytes), mapping: plan.mapping, skipped: plan.skipped,
+          segments: updatePlan.nextSegments,
+          ...(plan.workspace ? { workspace: { ...plan.workspace, status: 'attached' } } : {}),
+        };
+      await writeAtomic(manifestPath, updatedManifest);
+      const result = { status: 'updated', ...summary, duplicate: false, backup: directory };
+      if (!options._suppressAppRestartHint &&
+        (options._appRunning === undefined ? await appIsRunning(options.appLog) : options._appRunning)) {
+        result.warnings = [...(result.warnings || []), APP_RESTART_HINT];
+      }
+      if (options.app) {
+        try {
+          const rpc = options._rpc || await connectApp(options.appLog);
+          result.application = await inspectApp(rpc, plan.header.id, plan.events);
+        } catch (error) { result.application = { ok: false, ...errorInfo(error), hint: '原生会话已更新；运行中的应用需重启后重新验证。' }; }
+      }
+      result.ok = result.application?.ok !== false;
+      return result;
+    }
     if (plan.legacyBackup) {
       const old = plan.legacyBackup, path = join(directory, 'legacy-original.v4.jsonl.zstd');
       check(sha256(await readFile(old.path)) === old.sha256, 'SOURCE_CHANGED', '旧会话在导入前发生变化。');
@@ -199,7 +349,8 @@ export async function importSession(path, supplied = {}) {
         else await writeExclusive(target, file.bytes);
       }
       manifest = { schemaVersion: 1, adapterVersion: 2, status: 'prepared', createdAt: new Date().toISOString(),
-        ...summary, attachmentHome: options.attachmentHome, header: plan.header, eventsSha256: sha256(JSON.stringify(plan.events)), mapping: plan.mapping, skipped: plan.skipped };
+        ...summary, attachmentHome: options.attachmentHome, header: plan.header, eventsSha256: sha256(JSON.stringify(plan.events)),
+        mapping: plan.mapping, skipped: plan.skipped, segments: defaultSegments(plan.events) };
       if (plan.workspace) manifest.workspace = { ...plan.workspace, status: 'pending' };
       await writeExclusive(manifestPath, JSON.stringify(manifest, null, 2) + '\n');
     }
@@ -229,7 +380,8 @@ export async function importSession(path, supplied = {}) {
       }
     }
     await writeAtomic(manifestPath, manifest);
-    const result = { status: alreadyPresent ? 'already-imported' : 'imported', ...summary, duplicate: alreadyPresent, backup: directory };
+    const finalStatus = alreadyPresent ? 'already-imported' : updatePlan?.action === 'fork' ? 'forked' : 'imported';
+    const result = { status: finalStatus, ...summary, duplicate: alreadyPresent, backup: directory };
     if (workspaceResult) result.workspace = workspaceResult;
     if (options.pin) {
       try { result.pin = await pinImportedSession(plan.header.id, options, runtime); }

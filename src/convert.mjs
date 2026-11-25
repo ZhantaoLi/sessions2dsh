@@ -22,7 +22,7 @@ export function convertClaude(input, runtime, options = {}) {
   const { rows, skipped, warnings, cwd, metadataUuids } = prepareRows(input, options);
   check(isAbsolute(cwd), 'SOURCE_CWD', '工作目录必须是绝对路径。');
   const identity = input.sourceSessionId + (input.agentId ? `/agent/${input.agentId}` : '');
-  const id = targetSessionId(input);
+  const id = options.targetIdOverride || targetSessionId(input);
   const firstText = rows[0].message.content.filter(b => b.type === 'text').map(b => b.text).join(' ');
   const title = normalizedTitle(options.title || `${input.agentId ? `[Claude 子代理 ${input.agentId.slice(0, 8)}]` : '[Claude]'} ${firstText || input.sourceSessionId}`);
   const header = { version: 4, id, createdAt: Date.parse(rows[0].timestamp), cwd, isSeeded: false, delegationDepth: 0, agentPreset: 'standard' };

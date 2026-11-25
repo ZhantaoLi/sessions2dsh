@@ -25,6 +25,7 @@ src/snapshot.mjs        多文件来源快照与外置结果备份验证
 src/runtime.mjs         定位现有 dsh 运行时与挂载原生持久化
 src/workspace.mjs       dsh 工作区匹配、异常 cwd 回退与新会话登记
 src/manager.mjs         预览、备份、写入、重复检测和验证
+src/update.mjs          增量快进判定、事件序号平移与分叉快照 ID 派生
 src/app.mjs             可选的本机 dsh 应用 API 验证
 src/batch.mjs           批量执行、续跑、部分失败报告和工作流日志备份
 src/attachments.mjs     图片预检、原生附件发布与完整性校验
